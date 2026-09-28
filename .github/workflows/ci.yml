@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Syntax check (main plugin + helpers)
+        run: |
+          node --check index.js
+          node --check lib/dedup.js
+
+      - name: Smoke test (dual exports + V1 hooks)
+        run: |
+          node -e '
+          (async () => {
+            const mod = await import("./index.js");
+            const plugin = mod.default;
+            if (!plugin || typeof plugin !== "object") throw new Error("default export is not an object");
+            if (plugin.id !== "context-indicator") throw new Error("unexpected plugin id: " + plugin.id);
+            if (typeof plugin.setup !== "function") throw new Error("missing V2 setup()");
+            if (typeof plugin.server !== "function") throw new Error("missing V1 server()");
+
+            const client = {
+              tui: { showToast: async () => {} },
+              session: { messages: async () => ({ data: [] }), children: async () => ({ data: [] }) },
+              tool: { list: async () => ({ data: [] }) },
+            };
+            const hooks = await plugin.server({ client });
+            for (const h of ["config", "event", "experimental.chat.messages.transform", "experimental.chat.system.transform"]) {
+              if (typeof hooks[h] !== "function") throw new Error("missing V1 hook: " + h);
+            }
+            console.log("smoke test passed");
+          })().catch((e) => { console.error(e); process.exit(1); });
+          '
+
+      - name: TSX syntax check (tui sidebar)
+        run: npx --yes esbuild@0.23.1 tui.tsx --loader:.tsx=tsx --jsx=automatic --format=esm --outfile=/dev/null
