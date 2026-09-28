@@ -10,6 +10,8 @@ arguments and the residual "other" bucket.
 The package ships a **dual V1 + V2 plugin** (one entry works in both OpenCode
 generations) plus an optional TUI sidebar module exposed as the `./tui` entry.
 
+![TUI sidebar — per-category context breakdown](docs/sidebar.png)
+
 ---
 
 ## What it shows
