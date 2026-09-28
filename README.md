@@ -104,10 +104,13 @@ and `$TMPDIR` (usually `/tmp`) elsewhere:
 | `opencode-context-indicator-state.json` | Machine-readable snapshot consumed by the TUI sidebar |
 | `context-events.log` | Raw event tap — **only** when `DEBUG_EVENTS` is flipped to `true` in the source (off by default) |
 
-The live snapshot is **rewritten** (never grows). Final summaries (on
-`session.idle`) and compaction notes are appended and bounded in memory. All
-files are written atomically (temp + rename), so concurrent plugin instances
-cannot corrupt them.
+The live `context-breakdown.log` snapshot is **rewritten** (never grows); final
+summaries (on `session.idle`) and compaction notes are **appended** — log writes
+use plain `appendFileSync`, not atomic replacement. Only the machine-readable
+`opencode-context-indicator-state.json` is written **atomically** (temp file +
+rename), so concurrent plugin instances cannot corrupt it. Cross-instance
+duplicate final summaries are prevented separately by an atomic claim marker
+(see `lib/dedup.js`).
 
 ---
 
@@ -115,7 +118,8 @@ cannot corrupt them.
 
 ### OpenCode 2.x (V2)
 
-Use the CLI:
+Per the [OpenCode v2 plugin docs](https://opencode.ai/v2/docs/plugins), npm
+plugins are listed under the `plugins` (plural) config key. Use the CLI:
 
 ```sh
 opencode plugin add opencode-context-indicator
@@ -151,8 +155,8 @@ Add the package name to the `plugin` array in your `opencode.json`:
 ### Local file (no npm)
 
 Copy `index.js` and `lib/dedup.js` into `~/.config/opencode/plugins/`, keeping
-the `lib/` subdirectory next to the plugin file (the v2 loader ignores a
-directory without an index file, so `lib/` will not be registered as a plugin):
+the `lib/` subdirectory next to the plugin file so the plugin's `import` of the
+helper resolves. The `lib/` folder is support code, not a separate plugin entry:
 
 ```
 ~/.config/opencode/plugins/context-indicator.js
@@ -167,8 +171,9 @@ recommended path for the sidebar).
 
 ## Requirements
 
-* **Node.js ≥ 18** (uses only Node built-ins; `@opencode/plugin` is the sole npm
-  dependency).
+* **Node.js ≥ 18** (the main plugin uses only Node built-ins). `@opencode/plugin`
+  is an **optional** peer dependency: OpenCode resolves it at runtime, and
+  `index.js` itself does not import it (the V2 `define` helper is inlined).
 * **OpenCode ≥ 1.18.29** for the V1 path. ⚠️ The V1 path relies on
   `experimental.chat.*` hooks, which are **experimental** and may change or stop
   firing in future OpenCode 1.x releases; if they do, the indicator degrades

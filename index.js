@@ -415,13 +415,40 @@ function writeStateFile(
       typeof ctxTokens === "number" && ctxTokens > 0
         ? ctxTokens
         : inputTokens || 0;
+
+    // Read the existing file FIRST: when THIS instance has no fresh breakdown
+    // (the context hook did not fire here — e.g. the request was served by
+    // another plugin instance whose event stream is mirrored to us), keep the
+    // values already persisted instead of clobbering them with nulls/zeros.
+    let all = {};
+    try {
+      all = JSON.parse(readFileSync(STATE_FILE, "utf8"));
+    } catch {
+      all = {}; // missing / empty / corrupt -> start fresh
+    }
+    if (!all || typeof all !== "object" || Array.isArray(all)) all = {};
+    const pc = all[sessionID]?.categories || null;
+
+    const catUser = bd ? bd.userChars || 0 : pc?.user ?? 0;
+    const catAssistant = bd ? bd.assistantChars || 0 : pc?.assistant ?? 0;
+    const catReasoning = bd ? bd.reasoningChars || 0 : pc?.reasoning ?? 0;
+    const catToolArgs = bd ? bd.toolArgsChars || 0 : pc?.toolArgs ?? 0;
+    // system / tool schemas are hook-only; a fallback breakdown has them null
+    // and must not erase a value the hook already persisted.
+    const catSystem =
+      bd && bd.systemChars != null ? bd.systemChars : pc?.system ?? null;
+    const catToolSchemas =
+      bd && bd.toolSchemasChars != null
+        ? bd.toolSchemasChars
+        : pc?.toolSchemas ?? null;
+
     const sumEstimates =
-      (bd?.userChars || 0) +
-      (bd?.assistantChars || 0) +
-      (bd?.reasoningChars || 0) +
-      (bd?.toolArgsChars || 0) +
-      (bd?.systemChars || 0) +
-      (bd?.toolSchemasChars || 0);
+      catUser +
+      catAssistant +
+      catReasoning +
+      catToolArgs +
+      (catSystem || 0) +
+      (catToolSchemas || 0);
     const other = Math.max(0, (inputTokens || 0) - sumEstimates);
     const entry = {
       sessionID,
@@ -433,23 +460,16 @@ function writeStateFile(
       limit: limit != null ? limit : null,
       reasoning: typeof reasoningTokens === "number" ? reasoningTokens : 0,
       categories: {
-        user: bd?.userChars || 0,
-        assistant: bd?.assistantChars || 0,
-        reasoning: bd?.reasoningChars || 0,
-        toolArgs: bd?.toolArgsChars || 0,
-        system: bd?.systemChars ?? null,
-        toolSchemas: bd?.toolSchemasChars ?? null,
+        user: catUser,
+        assistant: catAssistant,
+        reasoning: catReasoning,
+        toolArgs: catToolArgs,
+        system: catSystem,
+        toolSchemas: catToolSchemas,
         other,
       },
       updatedAt: new Date().toISOString(),
     };
-    let all = {};
-    try {
-      all = JSON.parse(readFileSync(STATE_FILE, "utf8"));
-    } catch {
-      all = {}; // missing / empty / corrupt -> start fresh
-    }
-    if (!all || typeof all !== "object" || Array.isArray(all)) all = {};
     all[sessionID] = entry;
     // Bound the file: keep the most recently updated MAX_TRACKED_SESSIONS.
     const keys = Object.keys(all);
@@ -574,10 +594,13 @@ function getUsableContext(providerID, modelID) {
   const maxOutput =
     typeof rec.output === "number" && rec.output > 0 ? rec.output : 0;
   if (input == null && context == null) return null;
+  // Mirrors opencode overflow.ts: reserved = min(20000, maxOutput), i.e. 0 when
+  // the model declares no output limit (NOT a 20000 default — that would
+  // understate the usable window).
   const reserved =
     typeof rec.reserved === "number" && rec.reserved >= 0
       ? rec.reserved
-      : Math.min(20000, maxOutput || 20000);
+      : Math.min(20000, maxOutput);
   const usable = input != null ? input - reserved : context - maxOutput;
   if (!(usable > 0)) return null;
   return { usable, limit: context, maxOutput, reserved };
@@ -1307,6 +1330,9 @@ function makeV1(client) {
 
         if (event.type === "session.idle") {
           // Final summary to the log (best effort; never breaks anything).
+          // Timestamp captured BEFORE the async build so the cross-instance
+          // dedup key is stable across plugin instances.
+          const idleAt = Date.now();
           try {
             const modelID = lastKnownModel(sid);
             const providerID = lastKnownProvider(sid);
@@ -1327,13 +1353,17 @@ function makeV1(client) {
               lastKnownCtx(sid),
               lastKnownReasoning(sid),
             );
-            const summary = [`[${new Date().toISOString()}] FINAL session=${sid}`, ...lines.slice(1)];
-            finalSummaries.push(summary.join("\n"));
-            if (finalSummaries.length > MAX_FINAL_SUMMARIES) {
-              finalSummaries.splice(0, finalSummaries.length - MAX_FINAL_SUMMARIES);
-            }
-            writeLog([]); // persist final summaries
-            appendLogLine("");
+            // Claim once across instances: without this, every plugin instance
+            // appends its own FINAL line. V1 events carry no `id`, so fall back
+            // to a short time bucket (same strategy as the error-toast dedup).
+            const eventKey = event.id ?? event.properties?.id;
+            const claimKey = eventKey
+              ? `final:${eventKey}`
+              : `final:${sid}:${Math.floor(idleAt / 5000)}`;
+            pushFinalSummary(claimKey, [
+              `[${new Date().toISOString()}] FINAL session=${sid}`,
+              ...lines.slice(1),
+            ]);
           } catch (err) {
             logErr("final summary on idle failed", err);
           }
@@ -1479,11 +1509,19 @@ function makeV1(client) {
       if (reasoning > 0) extras.push(`r ${fmt(reasoning)}`);
       if (cacheRead > 0) extras.push(`c ${fmt(cacheRead)}`);
 
-      // Cost: only when the model config carries explicit pricing.
+      // Cost: only when the model config carries explicit pricing. Each token
+      // class is priced with its OWN rate; reasoning is already counted inside
+      // `output` (opencode reports output inclusive of reasoning), so it is NOT
+      // added separately. Absent rates are simply skipped.
       const price = mkey ? modelPrices.get(mkey) : null;
       if (price) {
-        const cost = (contextTokens / 1000) * (price.input || 0) +
-          (reasoning / 1000) * (price.input || 0);
+        const inputTok = typeof tokens.input === "number" ? tokens.input : 0;
+        const outputTok = typeof tokens.output === "number" ? tokens.output : 0;
+        const cost =
+          (inputTok / 1000) * (price.input || 0) +
+          (outputTok / 1000) * (price.output || 0) +
+          (cacheRead / 1000) * (price.cacheRead || 0) +
+          (cacheWrite / 1000) * (price.cacheWrite || 0);
         if (cost > 0) extras.push(`${cost.toFixed(4)}$`);
       }
       if (extras.length > 0) {
@@ -1670,6 +1708,127 @@ function onV2Context(context) {
     }
   } catch (err) {
     logErr("v2 context hook failed", err);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// V2 fallback: derive the message-based categories from the session's persisted
+// message list when the context hook did NOT populate the cache for this
+// session. This happens when the request was served by a DIFFERENT plugin
+// instance (the public event stream is mirrored to every instance, but the
+// breakdown cache is process-local) or when the hook did not fire at all.
+//
+// Only user / assistant / reasoning / tool-args can be derived from the
+// persisted SessionMessageInfo[]: the ASSEMBLED system prompt and the tool
+// schemas are exclusive to the context hook, so they stay null ("n/a" in the
+// sidebar) unless the hook ran. Tool RESULTS are deliberately not counted
+// (only call args), exactly like the hook / V1 estimator.
+function estimateBreakdownFromClientMessages(messages) {
+  let userChars = 0;
+  let assistantChars = 0;
+  let reasoningChars = 0;
+  let toolArgsChars = 0;
+  for (const m of messages || []) {
+    if (!m || typeof m !== "object") continue;
+    if (m.type === "user") {
+      userChars += estimateTokens(m.text);
+    } else if (m.type === "assistant") {
+      const parts = Array.isArray(m.content) ? m.content : [];
+      for (const p of parts) {
+        if (p?.type === "text") {
+          assistantChars += estimateTokens(p.text);
+        } else if (p?.type === "reasoning") {
+          reasoningChars += estimateTokens(p.text);
+        } else if (p?.type === "tool") {
+          // state.input is a string while streaming; only count the resolved
+          // object (running/completed/error) to avoid partial counts.
+          const input = p?.state?.input;
+          if (input && typeof input === "object") toolArgsChars += estJson(input);
+        }
+      }
+    }
+  }
+  return {
+    userChars,
+    assistantChars,
+    reasoningChars,
+    toolArgsChars,
+    systemChars: null,
+    toolSchemasChars: null,
+  };
+}
+
+// sessionID -> last time we hit the client session.context() fallback.
+const v2ContextFetchTimes = new Map();
+const V2_CONTEXT_FETCH_THROTTLE_MS = 5000; // min gap between fallback fetches
+// Background fallback requests are fire-and-forget (see the callers in the
+// event handlers): cap each at 3s so a slow/hung client cannot pin resources.
+const V2_FALLBACK_TIMEOUT_MS = 3000;
+
+// Fill breakdownCache for a session when the context hook has not already done
+// so. Throttled, fault-tolerant, READ-ONLY. Hook data always wins.
+async function ensureV2Breakdown(ctx, sessionID) {
+  if (!sessionID) return;
+  const cached = breakdownCache.get(sessionID);
+  if (cached && cached.source === "context-hook") return; // hook data wins
+  const now = Date.now();
+  if (
+    now - (v2ContextFetchTimes.get(sessionID) || 0) <
+    V2_CONTEXT_FETCH_THROTTLE_MS
+  ) {
+    return;
+  }
+  v2ContextFetchTimes.set(sessionID, now);
+  pruneMap(v2ContextFetchTimes, MAX_TRACKED_SESSIONS);
+  try {
+    const res = await withTimeout(
+      ctx.session.context({ sessionID }),
+      V2_FALLBACK_TIMEOUT_MS,
+      "session.context",
+    );
+    const msgs = Array.isArray(res) ? res : res?.data;
+    if (Array.isArray(msgs)) {
+      // Re-check AFTER the await: the context hook may have populated the cache
+      // while this fetch was in flight — hook data must win and must never be
+      // overwritten by a late fallback.
+      const latest = breakdownCache.get(sessionID);
+      if (!latest || latest.source !== "context-hook") {
+        breakdownCache.set(sessionID, {
+          ...estimateBreakdownFromClientMessages(msgs),
+          capturedAt: Date.now(),
+          source: "client-context",
+        });
+        pruneMap(breakdownCache, MAX_TRACKED_SESSIONS);
+      }
+    }
+  } catch (err) {
+    logErr("v2 session.context fallback failed", err);
+  }
+  // Opportunistically resolve the model: Desktop selects it AFTER
+  // session.created, so without this (or session.model.selected) a session can
+  // stay "unknown" even though its limit is resolvable.
+  if (
+    !lastKnownModelCache.has(sessionID) ||
+    !lastKnownProviderCache.has(sessionID)
+  ) {
+    try {
+      const info = await withTimeout(
+        ctx.session.get({ sessionID }),
+        V2_FALLBACK_TIMEOUT_MS,
+        "session.get",
+      );
+      const model = info?.model ?? info?.data?.model;
+      if (model && typeof model === "object") {
+        if (typeof model.id === "string") lastKnownModelCache.set(sessionID, model.id);
+        if (typeof model.providerID === "string") {
+          lastKnownProviderCache.set(sessionID, model.providerID);
+        }
+        pruneMap(lastKnownModelCache, MAX_TRACKED_SESSIONS);
+        pruneMap(lastKnownProviderCache, MAX_TRACKED_SESSIONS);
+      }
+    } catch (err) {
+      logErr("v2 session.get model fallback failed", err);
+    }
   }
 }
 
@@ -1890,6 +2049,25 @@ async function handleV2Event(ctx, event) {
     return;
   }
 
+  // Model chosen after session creation (the normal Desktop flow: the user
+  // picks the model in the UI). Without this the session stays "unknown"
+  // because session.created carries no model and session.step.ended has no
+  // model field.
+  if (event.type === "session.model.selected") {
+    const d = event.data || {};
+    const sid = d.sessionID;
+    if (!sid) return;
+    if (d.model && typeof d.model === "object") {
+      if (typeof d.model.id === "string") lastKnownModelCache.set(sid, d.model.id);
+      if (typeof d.model.providerID === "string") {
+        lastKnownProviderCache.set(sid, d.model.providerID);
+      }
+      pruneMap(lastKnownModelCache, MAX_TRACKED_SESSIONS);
+      pruneMap(lastKnownProviderCache, MAX_TRACKED_SESSIONS);
+    }
+    return;
+  }
+
   if (event.type === "session.deleted") {
     const sid = event.data?.sessionID;
     if (!sid) return;
@@ -1935,6 +2113,11 @@ async function handleV2Event(ctx, event) {
     const sid = event.data?.sessionID;
     if (!sid) return;
     try {
+      // Fire-and-forget: the client-API fallback must NOT block this
+      // instance's event loop (it would delay every other session's events).
+      // The result is picked up by a later state write; the 5s throttle bounds
+      // the cost. Never rejects.
+      void ensureV2Breakdown(ctx, sid).catch(() => {});
       const lines = buildLiveLinesV2(
         sid,
         lastKnownModel(sid),
@@ -2015,6 +2198,13 @@ async function handleV2Event(ctx, event) {
     } catch {
       // ignore — absolute token figures only
     }
+
+    // Make sure a breakdown exists for this session even if the context hook
+    // did not fire here (cross-instance mirror / hook gap). Fire-and-forget on
+    // purpose: awaiting it would serialize this instance's event handling
+    // behind up to the full client timeout. The cached result is written on the
+    // NEXT event; the 5s throttle bounds the cost. Never rejects.
+    void ensureV2Breakdown(ctx, sid).catch(() => {});
 
     const now = Date.now();
     const lastWrite = lastBdWrite.get(sid) || 0;

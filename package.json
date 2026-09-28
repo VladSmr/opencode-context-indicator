@@ -4,7 +4,6 @@
   "description": "Real-time OpenCode context-window usage indicator: per-category token breakdown written to a log file, plus an optional TUI sidebar. Dual V1 + V2 plugin entry.",
   "type": "module",
   "license": "MIT",
-  "author": "YOUR NAME",
   "exports": {
     ".": "./index.js",
     "./tui": "./tui.tsx"
@@ -28,26 +27,23 @@
     "tui",
     "sidebar"
   ],
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/YOUR-GITHUB-USER/opencode-context-indicator.git"
-  },
-  "homepage": "https://github.com/YOUR-GITHUB-USER/opencode-context-indicator#readme",
-  "bugs": {
-    "url": "https://github.com/YOUR-GITHUB-USER/opencode-context-indicator/issues"
-  },
   "publishConfig": {
     "access": "public"
   },
-  "dependencies": {
-    "@opencode/plugin": "latest"
-  },
+  "author": "VladSmr",
+  "repository": { "type": "git", "url": "git+https://github.com/VladSmr/opencode-context-indicator.git" },
+  "homepage": "https://github.com/VladSmr/opencode-context-indicator#readme",
+  "bugs": { "url": "https://github.com/VladSmr/opencode-context-indicator/issues" },
   "peerDependencies": {
-    "@opentui/core": ">=0.5.8",
-    "@opentui/solid": ">=0.5.8",
+    "@opencode/plugin": ">=2.0.16",
+    "@opentui/core": ">=0.5.12",
+    "@opentui/solid": ">=0.5.12",
     "solid-js": ">=1.9.0"
   },
   "peerDependenciesMeta": {
+    "@opencode/plugin": {
+      "optional": true
+    },
     "@opentui/core": {
       "optional": true
     },

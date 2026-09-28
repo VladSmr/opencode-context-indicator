@@ -17,11 +17,11 @@
  * Peer requirements (declared optional in package.json): @opentui/core,
  * @opentui/solid, solid-js.
  */
-import { Plugin, usePlugin } from "@opencode/plugin/tui"
-import { createSignal, Show } from "solid-js"
-import { readFileSync } from "node:fs"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
+import {Plugin, usePlugin} from "@opencode/plugin/tui"
+import {createSignal, Show} from "solid-js"
+import {readFileSync} from "node:fs"
+import {tmpdir} from "node:os"
+import {join} from "node:path"
 
 const STATE_FILE = join(tmpdir(), "opencode-context-indicator-state.json")
 const POLL_MS = 1000

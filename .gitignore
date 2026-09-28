@@ -2,3 +2,7 @@ node_modules/
 *.log
 *.tgz
 .DS_Store
+
+# IDE (IntelliJ IDEA)
+.idea/
+*.iml
