@@ -1,5 +1,14 @@
+/** @jsxImportSource @opentui/solid */
 /**
  * tui.tsx — optional OpenCode TUI sidebar for `opencode-context-indicator`.
+ *
+ * The import-source pragma on the first line above is REQUIRED: without it the
+ * opencode TUI loader (Bun) transforms JSX against the React runtime and emits
+ * `import ... from "react/jsx-runtime"`, which the TUI runtime does not provide,
+ * so loading the plugin from the npm cache throws `Cannot find package 'react'`
+ * (react only ever resolved from a developer's local node_modules). The pragma
+ * must stay the very first line, before any import, and no other pragma-like
+ * token may appear in this file. See the OpenTUI Solid integration guide.
  *
  * Exposed as the `./tui` package entry ("beside the main plugin for automatic
  * loading"). OpenCode loads it only in the terminal TUI; it is NOT loaded in
@@ -19,6 +28,7 @@
  */
 import {Plugin, usePlugin} from "@opencode/plugin/tui"
 import {createSignal, Show} from "solid-js"
+import type {ColorInput} from "@opentui/core"
 import {readFileSync} from "node:fs"
 import {tmpdir} from "node:os"
 import {join} from "node:path"
@@ -62,8 +72,10 @@ function num(v: unknown): number {
 // Theme tokens are OpenTUI RGBA values (see ResolvedTheme.text.base/.muted);
 // pass them straight to the renderer. Fall back to a named color when a token
 // is absent so an unexpected theme shape can never blank the sidebar.
-type Fg = string | object
-function token(v: unknown, fallback: string): Fg {
+// `fg` on <text> is typed as OpenTUI's ColorInput (= string | RGBA); using the
+// same alias keeps the JSX assignment type-correct instead of a loose `object`.
+type Fg = ColorInput
+function token(v: unknown, fallback: Fg): Fg {
   return v && typeof v === "object" ? (v as Fg) : fallback
 }
 
