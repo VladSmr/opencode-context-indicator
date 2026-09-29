@@ -66,6 +66,44 @@
  *   session.step.ended (keyed by the child's own sessionID). This is
  *   event-driven and does not need the removed API.
  *
+ *   V2 slash commands (added 1.1.0, verified against the live Desktop 2.0.19
+ *   plugin runtime). Two commands:
+ *     - /context — a 3-line summary of THIS session only (model, tokens, %,
+ *       updated + category line). Main only: NO subagent traversal and NO live
+ *       RPC (cache + state.json only), so it is instant. Delivered as a
+ *       resume:false notice; the chip label (`description`) is self-contained:
+ *       "Context: 41.5k (25%) · Auto · 12:36".
+ *     - /context-breakdown — the full markdown table (main + all subagent
+ *       descendants), collected in parallel under one budget. Delivered with
+ *       resume:true and a verbatim instruction prefix, so the agent echoes the
+ *       table into the transcript as a normal message (rendered in full by the
+ *       Desktop); resume:false remains a one-constant fallback.
+ *     - ctx.command.transform(editor => editor.add({ name, description,
+ *         execute })) — registers a slash command; `execute` receives the
+ *       invocation { sessionID, prompt:{text,files,agents,skills}, delivery }.
+ *     - ctx.session.synthetic({ sessionID, text, description?, resume? }) —
+ *       durably ADMITS a synthetic message to the session INBOX. `resume` only
+ *       gates whether the session is woken (Session.synthetic:
+ *       `if (resume !== false) wake(session)`): resume:true starts an agent turn
+ *       (grows session context), resume:false leaves a durable notice without
+ *       running the agent loop. A synthetic message is always shown as a compact
+ *       Notice chip whose label is `description ?? text` (client row-builder:
+ *       `synthetic` -> Notice), which is exactly why /context-breakdown uses
+ *       resume:true: the model answer, not the chip, carries the full table.
+ *     - session list = the parentID chain persisted in state.json (BFS from the
+ *       root; see collectDescendantSessionIDs). state.json is the ONLY source:
+ *       every entry is keyed by its own sessionID and carries the parentID
+ *       recorded at write time, so the chain is root-consistent — entries of
+ *       OTHER roots are unreachable. Finished / deleted subagents stay listed
+ *       while their state.json entry exists. Module-scope maps persist across
+ *       requests for the lifetime of a plugin INSTANCE; PluginSupervisor
+ *       (re)activates the plugin on start / config or file change / every 24h —
+ *       NOT per request — so an in-memory index would be cold for sessions
+ *       created before the current instance loaded, which is exactly why
+ *       discovery uses the durable state.json instead.
+ *     - All logic stays in module scope: the handlers need the in-memory maps.
+ *       The V1 server() path is intentionally untouched (commands are V2-only).
+ *
  * ---------------------------------------------------------------------------
  * TUI STATE BRIDGE (optional sidebar)
  * ---------------------------------------------------------------------------
@@ -220,6 +258,10 @@ const sessionParentCache = new Map();
 // V2: sessionID -> { input, output, reasoning, ctx, modelID, at } accumulated
 // from session.step.ended, used to fold child-session totals into the parent.
 const sessionTotals = new Map();
+
+// V2: sessionID -> agent name (session.created data.agent). Used only as the
+// role label ("sub:<agent>") in the /context-breakdown table.
+const sessionAgentCache = new Map();
 
 // Gating for client.config.providers() (V1) fetches:
 //   providersLoadedAt — last SUCCESSFUL fetch (full PROVIDERS_TTL_MS cache);
@@ -427,6 +469,7 @@ function writeStateFile(
       all = {}; // missing / empty / corrupt -> start fresh
     }
     if (!all || typeof all !== "object" || Array.isArray(all)) all = {};
+    const prevEntry = all[sessionID] || null;
     const pc = all[sessionID]?.categories || null;
 
     const catUser = bd ? bd.userChars || 0 : pc?.user ?? 0;
@@ -450,8 +493,18 @@ function writeStateFile(
       (catSystem || 0) +
       (catToolSchemas || 0);
     const other = Math.max(0, (inputTokens || 0) - sumEstimates);
+    // Parent link for the /context-breakdown command. Prefer the live cache;
+    // fall back to the previously persisted value (backward compatible with
+    // snapshots written before parentID existed -> null). role mirrors it.
+    const parentID =
+      sessionParentCache.has(sessionID)
+        ? sessionParentCache.get(sessionID) ?? null
+        : prevEntry?.parentID ?? null;
     const entry = {
       sessionID,
+      parentID,
+      role: parentID ? "sub" : "main",
+      agent: sessionAgentCache.get(sessionID) || null,
       model: modelID || "unknown",
       providerID: providerID || "",
       ctx: total,
@@ -606,6 +659,16 @@ function getUsableContext(providerID, modelID) {
   return { usable, limit: context, maxOutput, reserved };
 }
 
+// Store a model limit record under `<providerID>:<modelID>`. Written by
+// `ensureModelLimits` (V2: ctx.model.list()) and `ensureProviderLimits` (V1:
+// client.config.providers()), both carrying the effective merged config.
+function setModelLimit(providerID, modelID, rec) {
+  const key = modelKey(providerID, modelID);
+  if (!key) return false;
+  modelLimits.set(key, rec);
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // V1 breakdown estimation from messages (Array<{info, parts}>).
 // ---------------------------------------------------------------------------
@@ -736,7 +799,7 @@ async function ensureProviderLimits(client) {
             typeof lim.output === "number" && lim.output > 0 ? lim.output : null;
           if (context == null && input == null) continue;
           const prevRec = modelLimits.get(key);
-          modelLimits.set(key, {
+          setModelLimit(providerID, modelID, {
             context,
             input,
             output,
@@ -1765,6 +1828,22 @@ const V2_CONTEXT_FETCH_THROTTLE_MS = 5000; // min gap between fallback fetches
 // event handlers): cap each at 3s so a slow/hung client cannot pin resources.
 const V2_FALLBACK_TIMEOUT_MS = 3000;
 
+// Cumulative wall-clock budget for one /context-breakdown collection (root +
+// every descendant, fetched in PARALLEL). Each per-session live lookup is
+// additionally capped at V2_FALLBACK_TIMEOUT_MS, so the command costs about the
+// per-session cap (not the sum) instead of N × 3s for N subagents. A session
+// with no cached/snapshot categories whose bounded session.context lookup fails
+// or never gets any budget is tagged "no-data": ctx/model/updatedAt still come
+// from state.json / live, but the category cells stay n/a.
+const COMMAND_COLLECT_BUDGET_MS = 3500;
+
+// `resume` for the full /context-breakdown command. resume:true admits the
+// payload to the transcript AND wakes the session, so the agent echoes the table
+// as a normal message that the Desktop renders in full (the notice chip only
+// shows `description`). Set to false to fall back to a plain inbox notice if a
+// given runtime renders the model answer worse than the notice.
+const CONTEXT_BREAKDOWN_RESUME = true;
+
 // Fill breakdownCache for a session when the context hook has not already done
 // so. Throttled, fault-tolerant, READ-ONLY. Hook data always wins.
 async function ensureV2Breakdown(ctx, sessionID) {
@@ -1871,7 +1950,7 @@ async function ensureModelLimits(ctx) {
           typeof lim.output === "number" && lim.output > 0 ? lim.output : null;
         if (context == null && input == null) continue;
         const prevRec = modelLimits.get(key);
-        modelLimits.set(key, {
+        setModelLimit(providerID, modelID, {
           context,
           input,
           output,
@@ -2036,8 +2115,16 @@ async function handleV2Event(ctx, event) {
     const data = event.data || {};
     const sid = data.sessionID;
     if (!sid) return;
-    sessionParentCache.set(sid, data.parentID || null);
+    const parentID = data.parentID || null;
+    // sessionParentCache is the durable parent link used when WRITING the
+    // state.json entry (writeStateFile); discovery itself reads the persisted
+    // parentID chain — see collectDescendantSessionIDs.
+    sessionParentCache.set(sid, parentID);
     pruneMap(sessionParentCache, MAX_TRACKED_SESSIONS);
+    if (typeof data.agent === "string" && data.agent) {
+      sessionAgentCache.set(sid, data.agent);
+      pruneMap(sessionAgentCache, MAX_TRACKED_SESSIONS);
+    }
     if (data.model && typeof data.model === "object") {
       if (typeof data.model.id === "string") lastKnownModelCache.set(sid, data.model.id);
       if (typeof data.model.providerID === "string") {
@@ -2071,6 +2158,10 @@ async function handleV2Event(ctx, event) {
   if (event.type === "session.deleted") {
     const sid = event.data?.sessionID;
     if (!sid) return;
+    // Discovery reads the persisted parentID chain, so a deleted session drops
+    // out of the table as soon as its state.json entry is gone (or, while the
+    // stale entry lingers, via the phantom filter — a deleted session has no
+    // step). No dedicated in-memory index to clean up.
     clearSessionTracking(sid);
     return;
   }
@@ -2260,6 +2351,423 @@ async function handleV2Event(ctx, event) {
 }
 
 // ---------------------------------------------------------------------------
+// V2 slash commands: /context and /context-breakdown
+// ---------------------------------------------------------------------------
+// /context prints a 3-line summary of the CURRENT session only (cache +
+// state.json, no subagents, no RPC); /context-breakdown prints a compact
+// markdown table for the CURRENT session plus EVERY descendant (subagent)
+// session. Both deliver via ctx.session.synthetic({sessionID, text, ...}):
+// resume:true -> wake / agent turn (the model renders the table);
+// resume:false -> a durable notice, no LLM call. Works in the Desktop v2 app
+// (which has no TUI slots, issue #49380) and in the TUI. Registered only on
+// the V2 path.
+//
+// Session resolution cascade (per task): in-memory breakdownCache -> the
+// state.json snapshot -> a throttled/3s ctx.session.context() fallback. The
+// fallback cannot see the assembled system prompt or the tool schemas, so those
+// two cells stay "n/a" and the row's source is labelled honestly.
+
+// Read the whole state.json snapshot ({ sessionID: entry }) or {} on any error.
+function readStateSnapshot() {
+  try {
+    const all = JSON.parse(readFileSync(STATE_FILE, "utf8"));
+    return all && typeof all === "object" && !Array.isArray(all) ? all : {};
+  } catch {
+    return {};
+  }
+}
+
+// True when a state.json entry carries no measured tokens at all: a session
+// registered (session.created) but with no served step. `writeStateFile` always
+// persists `categories` as an object, so the emptiness test must SUM those
+// fields — a missing/`undefined` categories must not be the only trigger.
+// Note: `system` / `toolSchemas` may legitimately be null (hook-only), so they
+// are coerced with `|| 0`.
+function isEmptyStateEntry(entry) {
+  const c = entry?.categories || {};
+  const sum =
+    (c.user || 0) +
+    (c.assistant || 0) +
+    (c.reasoning || 0) +
+    (c.toolArgs || 0) +
+    (c.system || 0) +
+    (c.toolSchemas || 0) +
+    (c.other || 0);
+  return (
+    sum === 0 &&
+    (!entry?.ctx || entry.ctx === 0) &&
+    (!entry?.input || entry.input === 0)
+  );
+}
+
+// ALL descendant session IDs of `rootID` (breadth-first over the parentID chain
+// in the state.json snapshot), de-duplicated. The snapshot is the ONLY source:
+// each entry is keyed by its own sessionID and carries the parentID recorded
+// when it was written, so the chain is root-consistent — entries of OTHER roots
+// are unreachable from `rootID` (their parentID points at their own root). The
+// earlier cross-root leakage came from the in-memory index, which is no longer
+// consulted here.
+//
+// The BFS visits every level (subagents of subagents included). A phantom node
+// (no tokens, see isEmptyStateEntry) is never emitted, but traversal still
+// descends through it so real grandchildren behind a phantom parent are found.
+// `seen` guards against cycles (parentID loops) and double-listing.
+function collectDescendantSessionIDs(rootID, state) {
+  const seen = new Set([rootID]);
+  const out = [];
+  const queue = [rootID];
+  // Index the snapshot by parentID once (O(n)) instead of an O(n) scan per
+  // visited node.
+  const byParent = new Map();
+  for (const [id, entry] of Object.entries(state || {})) {
+    const pid = entry?.parentID;
+    if (!pid) continue;
+    let set = byParent.get(pid);
+    if (!set) {
+      set = new Set();
+      byParent.set(pid, set);
+    }
+    set.add(id);
+  }
+  while (queue.length > 0) {
+    const cur = queue.shift();
+    const kids = byParent.get(cur);
+    if (!kids) continue;
+    for (const c of kids) {
+      if (!c || seen.has(c)) continue; // cycle + dedup guard
+      seen.add(c);
+      if (!isEmptyStateEntry(state[c])) out.push(c);
+      queue.push(c); // descend through phantom parents too
+    }
+  }
+  return out;
+}
+
+// Normalise a breakdown record (cache or state entry) into the 7 categories.
+// `inputTokens` is used only for the residual "other".
+function breakdownCategories(rec, inputTokens) {
+  const user = rec?.userChars ?? rec?.user ?? 0;
+  const assistant = rec?.assistantChars ?? rec?.assistant ?? 0;
+  const reasoning = rec?.reasoningChars ?? rec?.reasoning ?? 0;
+  const toolArgs = rec?.toolArgsChars ?? rec?.toolArgs ?? 0;
+  const system = rec?.systemChars !== undefined ? rec.systemChars : rec?.system ?? null;
+  const toolSchemas =
+    rec?.toolSchemasChars !== undefined ? rec.toolSchemasChars : rec?.toolSchemas ?? null;
+  const sum =
+    user + assistant + reasoning + toolArgs + (system || 0) + (toolSchemas || 0);
+  const other = Math.max(0, (inputTokens || 0) - sum);
+  return { user, assistant, reasoning, toolArgs, system, toolSchemas, other };
+}
+
+// Short source tag for the table (kept tiny on purpose).
+function sourceTag(source) {
+  switch (source) {
+    case "context-hook":
+      return "live";
+    case "client-context":
+      return "fallback";
+    case "snapshot":
+      return "snap";
+    case "no-data":
+      return "no-data";
+    default:
+      return source || "none";
+  }
+}
+
+function timeOnly(iso) {
+  if (!iso) return "-";
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return "-";
+    return d.toTimeString().slice(0, 8); // HH:MM:SS
+  } catch {
+    return "-";
+  }
+}
+
+// Resolve one session's report: totals, model, categories + honest source.
+// `deadline` is the shared wall-clock budget for the whole command collection
+// (see commandContextBreakdown): the per-session live lookups are capped by
+// whatever remains of it and skipped once it is exhausted. A session that ends
+// up with no category data is tagged "no-data" (see the branch below).
+async function collectSessionReport(ctx, sessionID, state, deadline) {
+  const entry = state?.[sessionID] || null;
+  const bd = breakdownCache.get(sessionID) || null;
+
+  const remaining = Math.max(0, (deadline || 0) - Date.now());
+  const budget = Math.min(V2_FALLBACK_TIMEOUT_MS, remaining);
+
+  // The attribution/model caches survive across requests for the lifetime of a
+  // plugin instance. When cold — and while budget remains — resolve the session
+  // live so the [sub:<agent>] attribution and the model stay correct even if
+  // state.json is stale. ParentID comes from state.json ONLY (entry?.parentID)
+  // so the table is root-consistent; in-memory sessionParentCache is cross-session
+  // and must NOT be used for attribution.
+  const needEnrich =
+    !sessionAgentCache.has(sessionID) ||
+    lastKnownModel(sessionID) === "unknown";
+
+  // Fallback categories only when neither the live cache nor a state snapshot
+  // has them: derive user/assistant/reasoning/tool-args from the persisted
+  // message list (system/tool-schemas stay null there).
+  const needFallback = !bd && !entry?.categories;
+
+  // Enrichment and the context fallback run CONCURRENTLY, both bounded by the
+  // shared budget. Non-fatal: any failure resolves to null and keeps whatever
+  // the cache / state.json already provides.
+  const [live, contextMsgs] = await Promise.all([
+    needEnrich && budget > 0
+      ? withTimeout(ctx.session.get({ sessionID }), budget, "session.get").then(
+          (info) => info?.data ?? info ?? null,
+          (err) => {
+            logErr(`context-breakdown: session.get enrichment failed for ${sessionID}`, err);
+            return null;
+          },
+        )
+      : null,
+    needFallback && budget > 0
+      ? withTimeout(ctx.session.context({ sessionID }), budget, "session.context").then(
+          (res) => (Array.isArray(res) ? res : res?.data),
+          (err) => {
+            logErr(`context-breakdown: session.context fallback failed for ${sessionID}`, err);
+            return null;
+          },
+        )
+      : null,
+  ]);
+
+  let categories = null;
+  let source = "none";
+  if (bd) {
+    categories = breakdownCategories(bd, lastKnownInput(sessionID) || entry?.input || 0);
+    source = bd.source || "live";
+  } else if (entry?.categories) {
+    categories = entry.categories;
+    source = "snapshot";
+  } else if (Array.isArray(contextMsgs)) {
+    categories = breakdownCategories(
+      estimateBreakdownFromClientMessages(contextMsgs),
+      0,
+    );
+    source = "client-context";
+  } else if (needFallback) {
+    // No live cache, no state.json categories, and the bounded session.context
+    // fallback produced no usable messages (it failed or had no budget left).
+    // The category cells stay n/a; ctx/model/updatedAt still come from
+    // state.json / the live lookup.
+    source = "no-data";
+  }
+
+  const liveModel =
+    live?.model && typeof live.model === "object" ? live.model : null;
+  const cachedModel = lastKnownModel(sessionID);
+  const modelID =
+    cachedModel !== "unknown"
+      ? cachedModel
+      : liveModel?.id || entry?.model || "unknown";
+  const providerID =
+    lastKnownProvider(sessionID) || liveModel?.providerID || entry?.providerID || "";
+  const ctxTokens = lastKnownCtx(sessionID) || entry?.ctx || 0;
+  const usableInfo = getUsableContext(providerID, modelID);
+  const usable =
+    usableInfo?.usable ?? entry?.usable ?? getModelLimit(providerID, modelID) ?? null;
+  const parentID = entry?.parentID ?? null;
+  const updatedAt =
+    entry?.updatedAt ||
+    (bd?.capturedAt ? new Date(bd.capturedAt).toISOString() : null);
+  return {
+    sessionID,
+    parentID,
+    agent: sessionAgentCache.get(sessionID) || entry?.agent || null,
+    modelID,
+    providerID,
+    ctxTokens,
+    usable,
+    categories,
+    source,
+    updatedAt,
+  };
+}
+
+function fmtCell(n) {
+  return n == null ? "n/a" : fmt(n);
+}
+
+// One markdown table row. Categories sit in columns (short headers) to keep the
+// table compact; the ctx column already carries the percentage.
+function renderSessionRow(r, isMain) {
+  const c = r.categories || {};
+  const role = isMain ? "main" : r.agent ? `sub:${r.agent}` : "sub";
+  const pct =
+    r.usable && r.usable > 0
+      ? ` (${((r.ctxTokens / r.usable) * 100).toFixed(0)}%)`
+      : "";
+  const ctx = `${fmt(r.ctxTokens)}${pct}`;
+  const upd = `${timeOnly(r.updatedAt)} ${sourceTag(r.source)}`;
+  return `| ${role} | ${r.modelID} | ${ctx} | ${fmtCell(c.user)} | ${fmtCell(c.assistant)} | ${fmtCell(c.reasoning)} | ${fmtCell(c.toolArgs)} | ${fmtCell(c.system)} | ${fmtCell(c.toolSchemas)} | ${fmtCell(c.other)} | ${upd} |`;
+}
+
+function renderBreakdownTable(rows, childCount) {
+  const lines = [];
+  lines.push("### Context breakdown");
+  lines.push("");
+  lines.push(
+    "| role | model | ctx | usr | asst | rsn | tool | sys | schm | oth | updated (src) |",
+  );
+  lines.push("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
+  for (const row of rows) lines.push(row);
+  lines.push("");
+  lines.push(
+    `_${childCount} subagent session(s). Tokens are estimates (unicode heuristic). ` +
+      `usr=user, asst=assistant, rsn=reasoning, tool=tool args, sys=system prompt, ` +
+      `schm=tool schemas, oth=residual input. src: live=context hook, snap=state.json, ` +
+      `fallback=session.context (no system/schemas → n/a), no-data=categories unavailable._`,
+  );
+  return lines.join("\n");
+}
+
+// Shared delivery via ctx.session.synthetic — a synthetic message ALWAYS enters
+// the session inbox; `resume` only gates whether the session is woken:
+//   resume:false -> durable notice, session NOT woken (LLM context unchanged);
+//   resume:true  -> same inbox item PLUS a wake, i.e. an agent turn runs and the
+//                   session context grows (a real LLM request is issued).
+// Returns true on success. On failure the user sees nothing, so we log a loud,
+// actionable error; the payload is still written to the human-readable log by the
+// caller (there is no other verified delivery channel: no noReply/prompt option
+// exists in this runtime).
+async function deliverSynthetic(ctx, sid, text, description, resume) {
+  try {
+    await ctx.session.synthetic({ sessionID: sid, text, description, resume });
+    return true;
+  } catch (err) {
+    logErr(
+      `context command: session.synthetic FAILED (session=${sid}, ` +
+        `resume=${resume}) — no message delivered; payload preserved in the context log`,
+      err,
+    );
+    return false;
+  }
+}
+
+// ---- /context : quick summary of THIS session only (no subagents, no RPC) ----
+
+// The one-line description is what the Desktop notice chip shows, so it must be
+// self-contained (model + tokens + % + time).
+function shortSummaryDescription(r) {
+  const pct =
+    r.usable && r.usable > 0
+      ? ` (${((r.ctxTokens / r.usable) * 100).toFixed(0)}%)`
+      : "";
+  const hhmm = timeOnly(r.updatedAt).slice(0, 5);
+  const model = r.modelID && r.modelID !== "unknown" ? r.modelID : "model?";
+  return `Context: ${fmt(r.ctxTokens)}${pct} · ${model} · ${hhmm}`;
+}
+
+// Three short lines, built from cache/state only (see commandContextSummary).
+function shortSummaryText(r) {
+  const model =
+    r.modelID && r.modelID !== "unknown" ? r.modelID : "unknown model";
+  const total =
+    r.usable && r.usable > 0
+      ? ` / ${fmt(r.usable)} (${((r.ctxTokens / r.usable) * 100).toFixed(0)}%)`
+      : "";
+  const lines = [`**Context** — ${model} · ${fmt(r.ctxTokens)}${total}`];
+  const c = r.categories;
+  if (c) {
+    lines.push(
+      `usr ${fmtCell(c.user)} · asst ${fmtCell(c.assistant)} · rsn ${fmtCell(c.reasoning)} · ` +
+        `tool ${fmtCell(c.toolArgs)} · sys ${fmtCell(c.system)} · schm ${fmtCell(c.toolSchemas)} · ` +
+        `oth ${fmtCell(c.other)}`,
+    );
+  } else {
+    lines.push("_category breakdown unavailable (no cache/state entry yet)_");
+  }
+  lines.push(`updated ${timeOnly(r.updatedAt)} (${sourceTag(r.source)})`);
+  return lines.join("\n");
+}
+
+// /context handler: main session only, cache + state.json only (NO enrichment,
+// NO child traversal) -> instant. Delivered as resume:true so the model
+// renders the 3-line summary as a normal assistant message (the Desktop
+// notice chip only shows `description`).
+async function commandContextSummary(ctx, invocation, opts) {
+  const name = opts?.name || "context";
+  const sid = invocation?.sessionID || invocation?.session?.id;
+  if (!sid) {
+    logErr("context: invocation carried no sessionID");
+    return;
+  }
+  try {
+    const state = readStateSnapshot();
+    // Deadline in the past => collectSessionReport performs no live RPC at all
+    // (cache + state.json only), which keeps this command instant.
+    const report = await collectSessionReport(ctx, sid, state, 0);
+    const body = shortSummaryText(report);
+    // Reproduce verbatim so the model echoes the 3 lines as the assistant
+    // answer; the Desktop renders that answer in full (the notice chip only
+    // shows `description`).
+    const text = `${BREAKDOWN_MODEL_INSTRUCTION}\n\n${body}`;
+    const description = shortSummaryDescription(report);
+    const delivered = await deliverSynthetic(ctx, sid, text, description, true);
+    pushFinalSummary(`cmd:${sid}:${Date.now()}`, [
+      `[${new Date().toISOString()}] COMMAND ${name} session=${sid} delivered=${delivered}`,
+      ...text.split("\n"),
+    ]);
+  } catch (err) {
+    logErr("context command failed", err);
+  }
+}
+
+// ---- /context-breakdown : full table (main + subagents), model-rendered ----
+
+// Prefixed to the table for resume:true so the agent echoes it verbatim into the
+// transcript (the Desktop renders the model's answer as a normal message).
+const BREAKDOWN_MODEL_INSTRUCTION =
+  "Reproduce the markdown table below exactly, verbatim, with no changes and no commentary:";
+
+// Command handler shared by both slash commands. Registered via
+// ctx.command.transform in setup(); invoked by opencode with
+// { sessionID, prompt:{text,...}, delivery }. `opts` = { resume, name }.
+async function commandContextBreakdown(ctx, invocation, opts) {
+  const resume = !!opts?.resume;
+  const name = opts?.name || "context-breakdown";
+  const sid = invocation?.sessionID || invocation?.session?.id;
+  if (!sid) {
+    logErr("context-breakdown: invocation carried no sessionID");
+    return;
+  }
+  try {
+    // state.json is read immediately and synchronously; the root and every
+    // descendant are then collected IN PARALLEL under one cumulative budget, so
+    // the command costs ~budget regardless of the subagent count (not N × 3s).
+    const state = readStateSnapshot();
+    const childIDs = collectDescendantSessionIDs(sid, state);
+    const deadline = Date.now() + COMMAND_COLLECT_BUDGET_MS;
+    const [root, ...children] = await Promise.all([
+      collectSessionReport(ctx, sid, state, deadline),
+      ...childIDs.map((cid) => collectSessionReport(ctx, cid, state, deadline)),
+    ]);
+    const rows = [renderSessionRow(root, true)];
+    for (const rep of children) rows.push(renderSessionRow(rep, false));
+    const table = renderBreakdownTable(rows, childIDs.length);
+    const payload = resume ? `${BREAKDOWN_MODEL_INSTRUCTION}\n\n${table}` : table;
+    const description = `Full context breakdown — ${1 + childIDs.length} session(s)`;
+
+    const delivered = await deliverSynthetic(ctx, sid, payload, description, resume);
+
+    // Persist the table itself (not the instruction) to the human-readable log
+    // (survives rewrites, bounded) so it is always recoverable.
+    pushFinalSummary(`cmd:${sid}:${Date.now()}`, [
+      `[${new Date().toISOString()}] COMMAND ${name} session=${sid} delivered=${delivered}`,
+      ...table.split("\n"),
+    ]);
+  } catch (err) {
+    logErr("context-breakdown command failed", err);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Entrypoints
 // ---------------------------------------------------------------------------
 
@@ -2277,57 +2785,65 @@ export default {
       logErr("v2 context hook registration failed", err);
     }
 
-    // Effective per-model context limits, captured synchronously from the
-    // model registry whenever it is (re)built. This is the authoritative V2
-    // source and is available immediately (no async race right after boot).
-    // Read-only: the editor is never mutated.
-    try {
-      registrations.push(
-        await ctx.model.transform((editor) => {
-          try {
-            const list = typeof editor?.list === "function" ? editor.list() : [];
-            for (const m of list || []) {
-              const modelID = m?.modelID ?? m?.id;
-              const providerID =
-                typeof m?.providerID === "string" && m.providerID
-                  ? m.providerID
-                  : typeof m?.provider?.id === "string"
-                    ? m.provider.id
-                    : "";
-              const key = modelKey(providerID, modelID);
-              const lim = m?.limit;
-              if (!key || !lim || typeof lim !== "object") continue;
-              const context =
-                typeof lim.context === "number" && lim.context > 0 ? lim.context : null;
-              const input =
-                typeof lim.input === "number" && lim.input > 0 ? lim.input : null;
-              const output =
-                typeof lim.output === "number" && lim.output > 0 ? lim.output : null;
-              if (context == null && input == null) continue;
-              const prevRec = modelLimits.get(key);
-              modelLimits.set(key, {
-                context,
-                input,
-                output,
-                reserved:
-                  typeof m?.compaction?.reserved === "number"
-                    ? m.compaction.reserved
-                    : (prevRec?.reserved ?? null),
-              });
-            }
-          } catch (err) {
-            logErr("v2 model transform limits failed", err);
-          }
-        }),
-      );
-    } catch (err) {
-      logErr("v2 model transform registration failed", err);
-    }
+    // The model registry is captured asynchronously through ensureModelLimits
+    // (ctx.model.list(), rank 3) — the authoritative source that carries the
+    // user's merged config overrides. ctx.model.transform fires synchronously
+    // on every catalog rebuild BEFORE ctx.model.list completes and carries the
+    // generic Model.Info defaults (context:200000, output:32000) for provider-
+    // declared models before overrides are applied; writing it to modelLimits
+    // would flip the denominator from the configured window to the generic
+    // default on every catalog rebuild (observed: a configured window flipping
+    // to the generic 200k default), so the transform is not used for limit
+    // population.
 
     // Fire-and-forget prefetch of effective model limits.
     ensureModelLimits(ctx).catch((err) =>
       logErr("model limits prefetch failed", err),
     );
+
+    // Two V2 slash commands (V2 only): /context (instant per-session summary)
+    // and /context-breakdown (full table, main + all subagent descendants).
+    // Guarded: older 2.0.x builds may lack ctx.command / ctx.session.synthetic —
+    // registering a command whose handler cannot deliver would fail silently.
+    try {
+      const canCommand =
+        ctx.command && typeof ctx.command.transform === "function";
+      const canSynthetic =
+        !!ctx.session && typeof ctx.session.synthetic === "function";
+      if (canCommand && canSynthetic) {
+        registrations.push(
+          await ctx.command.transform((editor) => {
+            try {
+              editor.add({
+                name: "context",
+                description:
+                  "Quick context summary for the current session (compact notice)",
+                execute: (invocation) =>
+                  commandContextSummary(ctx, invocation, { name: "context" }),
+              });
+              editor.add({
+                name: "context-breakdown",
+                description:
+                  "Full per-session context breakdown table (main + subagents), rendered by the model",
+                execute: (invocation) =>
+                  commandContextBreakdown(ctx, invocation, {
+                    resume: CONTEXT_BREAKDOWN_RESUME,
+                    name: "context-breakdown",
+                  }),
+              });
+            } catch (err) {
+              logErr("v2 command transform failed", err);
+            }
+          }),
+        );
+      } else {
+        logErr(
+          `context commands not registered (command=${canCommand}, synthetic=${canSynthetic})`,
+        );
+      }
+    } catch (err) {
+      logErr("v2 command transform registration failed", err);
+    }
 
     const controller = new AbortController();
     void (async () => {
