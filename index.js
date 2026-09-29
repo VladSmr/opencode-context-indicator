@@ -177,7 +177,8 @@ const CRITICAL_THROTTLE_MS = 10000; // min gap between critical (>90%) toasts
 const ERROR_TOAST_DEDUP_MS = 60000; // same error -> at most one toast / window
 const COMPACTED_TOAST_DEDUP_MS = 60000; // compacted-toast dedup window
 const PROVIDERS_TTL_MS = 5 * 60 * 1000; // providers()/model.list() cache TTL after SUCCESS
-const PROVIDERS_FAIL_TTL_MS = 30 * 1000; // retry-no-sooner gate after FAILURE
+const PROVIDERS_FAIL_TTL_MS = 30 * 1000; // retry-no-sooner base after FAILURE (doubles per consecutive miss)
+const V2_LIMITS_MAX_BACKOFF_MS = 5 * 60 * 1000; // cap for the model.list retry backoff
 const PROVIDERS_FETCH_TIMEOUT_MS = 2000; // hard cap for one providers() call (V1)
 const V2_MODEL_FETCH_TIMEOUT_MS = 8000; // hard cap for one ctx.model.list() call (V2)
 const TOAST_MS_ERROR = 8000; // duration for error / overflow toasts
@@ -278,6 +279,7 @@ let providersInFlight = null;
 // absolute tokens (as in V1).
 let v2LimitsLoadedAt = 0;
 let v2LimitsFailAt = 0;
+let v2LimitsFailCount = 0; // consecutive soft-failures -> exponential retry backoff
 let v2LimitsInFlight = null;
 
 // Bounded list of final summaries written on session.idle
@@ -472,6 +474,14 @@ function writeStateFile(
     const prevEntry = all[sessionID] || null;
     const pc = all[sessionID]?.categories || null;
 
+    // Same model AND provider? Only then is a previously persisted denominator
+    // meaningful — a session that switched model (or provider, even with the
+    // same modelID) must not inherit the old window.
+    const sameModelAsPrev =
+      prevEntry != null &&
+      prevEntry.model === (modelID || "unknown") &&
+      (prevEntry.providerID || "") === (providerID || "");
+
     const catUser = bd ? bd.userChars || 0 : pc?.user ?? 0;
     const catAssistant = bd ? bd.assistantChars || 0 : pc?.assistant ?? 0;
     const catReasoning = bd ? bd.reasoningChars || 0 : pc?.reasoning ?? 0;
@@ -504,13 +514,23 @@ function writeStateFile(
       sessionID,
       parentID,
       role: parentID ? "sub" : "main",
-      agent: sessionAgentCache.get(sessionID) || null,
+      agent: sessionAgentCache.get(sessionID) || prevEntry?.agent || null,
       model: modelID || "unknown",
       providerID: providerID || "",
       ctx: total,
       input: inputTokens || 0,
-      usable: denom,
-      limit: limit != null ? limit : null,
+      // Do NOT clobber a known denominator with null: multiple plugin instances
+      // share this file and one of them may lack modelLimits (its ctx.model.list
+      // returned nothing). Keep the previous model's known value when the live
+      // lookup came back empty, so a transient miss never becomes permanent.
+      usable:
+        denom != null ? denom : sameModelAsPrev ? prevEntry.usable ?? null : null,
+      limit:
+        limit != null
+          ? limit
+          : sameModelAsPrev && typeof prevEntry.limit === "number"
+            ? prevEntry.limit
+            : null,
       reasoning: typeof reasoningTokens === "number" ? reasoningTokens : 0,
       categories: {
         user: catUser,
@@ -1916,7 +1936,14 @@ async function ensureV2Breakdown(ctx, sessionID) {
 async function ensureModelLimits(ctx) {
   const now = Date.now();
   if (now - v2LimitsLoadedAt < PROVIDERS_TTL_MS) return; // fresh success
-  if (now - v2LimitsFailAt < PROVIDERS_FAIL_TTL_MS) return; // recent failure
+  // Recent failure: back off exponentially (30s, 60s, 120s … capped at 5 min)
+  // so a registry that is slow to expose the provider is retried without
+  // hammering it, while a one-off blip still recovers quickly.
+  const failBackoff = Math.min(
+    PROVIDERS_FAIL_TTL_MS * Math.pow(2, Math.max(0, v2LimitsFailCount - 1)),
+    V2_LIMITS_MAX_BACKOFF_MS,
+  );
+  if (now - v2LimitsFailAt < failBackoff) return; // recent failure
   if (v2LimitsInFlight) return v2LimitsInFlight; // dedup parallel callers
   v2LimitsInFlight = (async () => {
     try {
@@ -1927,7 +1954,13 @@ async function ensureModelLimits(ctx) {
       );
       const models = Array.isArray(res) ? res : res?.data;
       if (!Array.isArray(models)) {
+        v2LimitsFailCount++;
         v2LimitsFailAt = Date.now(); // malformed payload -> retry soon
+        const seeded = hydrateModelLimitsFromState();
+        logErr(
+          "model.list returned no model array — limits unavailable, will retry",
+          { payloadType: typeof res, hydratedFromState: seeded },
+        );
         return;
       }
       let found = 0;
@@ -1964,11 +1997,36 @@ async function ensureModelLimits(ctx) {
       // An empty / limit-less payload right after boot (registry not ready yet)
       // must NOT be cached as success, or limits would stay unknown for the
       // full TTL — treat it as a soft failure and retry after the fail gate.
-      if (found > 0) v2LimitsLoadedAt = Date.now();
-      else v2LimitsFailAt = Date.now();
+      if (found > 0) {
+        v2LimitsLoadedAt = Date.now();
+        v2LimitsFailCount = 0; // recovered
+      } else {
+        // Soft failure: the registry answered but carried no usable limit for
+        // any model (provider not registered yet, or `limit` absent). Log WHY
+        // once per backoff window, and fall back to the shared snapshot so
+        // denominators do not vanish meanwhile.
+        const withLimit = models.filter(
+          (m) => m?.limit && typeof m.limit === "object",
+        ).length;
+        const lanit = models.filter(
+          (m) => m?.providerID === "lanit" || m?.provider?.id === "lanit",
+        ).length;
+        const seeded = hydrateModelLimitsFromState();
+        v2LimitsFailCount++;
+        v2LimitsFailAt = Date.now();
+        logErr(
+          "model.list yielded 0 usable limits — retrying",
+          { models: models.length, withLimit, lanit, hydratedFromState: seeded },
+        );
+      }
     } catch (err) {
-      v2LimitsFailAt = Date.now(); // failed attempt -> short retry gate
-      logErr("model.list failed", err);
+      v2LimitsFailCount++;
+      v2LimitsFailAt = Date.now(); // failed attempt -> backoff gate
+      const seeded = hydrateModelLimitsFromState();
+      logErr(
+        `model.list failed (hydrated ${seeded} limit(s) from state.json)`,
+        err,
+      );
     } finally {
       v2LimitsInFlight = null;
     }
@@ -2374,6 +2432,56 @@ function readStateSnapshot() {
     return all && typeof all === "object" && !Array.isArray(all) ? all : {};
   } catch {
     return {};
+  }
+}
+
+// Seed `modelLimits` from previously persisted state.json entries. state.json is
+// a SHARED cross-instance snapshot rewritten at every live step, so it carries a
+// model's window even when THIS instance's ctx.model.list() came back empty (a
+// cold instance, or one whose model registry did not expose the provider).
+// Without this, a transient list miss degraded every denominator to "?" — and
+// because writeStateFile used to rewrite usable/limit from the (empty) in-memory
+// map, the degradation became permanent. Strictly additive: real in-memory
+// records always win (never overwritten). Returns the number of records seeded.
+function hydrateModelLimitsFromState() {
+  try {
+    const all = readStateSnapshot();
+    let added = 0;
+    for (const entry of Object.values(all)) {
+      const providerID =
+        typeof entry?.providerID === "string" ? entry.providerID : "";
+      const modelID = entry?.model;
+      const key = modelKey(providerID, modelID);
+      if (!key || !modelID || modelID === "unknown") continue;
+      if (modelLimits.has(key)) continue; // a real record always wins
+      // A state entry stores the derived usable window (`usable`) and the raw
+      // context window (`limit`) — NOT the input/output/reserved triple. Seed
+      // `usable` as `input` (reserved 0) so getUsableContext() re-derives EXACTLY
+      // the same denominator the warm instance persisted; seeding `limit` as
+      // context instead would let the cold instance show the raw context window
+      // (e.g. 200k) while the warm one shows the true usable window (e.g. 168k).
+      // Fall back to `limit` as context only when no `usable` was recorded.
+      const usable =
+        typeof entry?.usable === "number" && entry.usable > 0
+          ? entry.usable
+          : null;
+      const ctxLimit =
+        typeof entry?.limit === "number" && entry.limit > 0
+          ? entry.limit
+          : null;
+      let rec = null;
+      if (usable != null) {
+        rec = { context: ctxLimit, input: usable, output: null, reserved: 0 };
+      } else if (ctxLimit != null) {
+        rec = { context: ctxLimit, input: null, output: null, reserved: null };
+      }
+      if (rec == null) continue;
+      modelLimits.set(key, rec);
+      added++;
+    }
+    return added;
+  } catch {
+    return 0;
   }
 }
 
@@ -2795,6 +2903,10 @@ export default {
     // default on every catalog rebuild (observed: a configured window flipping
     // to the generic 200k default), so the transform is not used for limit
     // population.
+
+    // Seed limits from the shared snapshot FIRST: another instance may already
+    // have resolved them, so a cold start never shows "?" denominators.
+    hydrateModelLimitsFromState();
 
     // Fire-and-forget prefetch of effective model limits.
     ensureModelLimits(ctx).catch((err) =>

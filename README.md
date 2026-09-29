@@ -196,6 +196,13 @@ back to a plain notice if needed.
   with no category data (no cache/snapshot and the fallback failed or ran out of
   budget) is tagged `no-data`; `ctx` / `model` / `updatedAt` still come from
   `state.json` / the live lookup, while its category cells stay `n/a`.
+* **The denominator survives a transient model-registry miss.** If the serving
+  instance's `ctx.model.list()` returns no usable limits (freshly loaded instance,
+  provider not yet registered, malformed payload), the window is recovered from
+  the `state.json` snapshot instead of degrading the `ctx` column to `?`; limits
+  are also seeded from the snapshot at startup, and the retry backs off
+  (30 s → 5 min, capped). A known `usable`/`limit`/`agent` is never overwritten
+  with `null` when another instance rewrites the snapshot.
 * Both commands append their payload to `context-breakdown.log` (final-summaries
   section), so it stays recoverable even if delivery fails.
 * If `ctx.session.synthetic` throws, the command logs an actionable error and the
