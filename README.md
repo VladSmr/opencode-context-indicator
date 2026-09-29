@@ -73,6 +73,10 @@ other          5.6k   12%
 updated 12:30:01
 ```
 
+> Requires a `file://` install from a path outside `node_modules`; on the npm
+> path the sidebar is auto-disabled. See
+> [Live sidebar: npm vs file:// install](#live-sidebar-npm-vs-file-install).
+
 ### Slash commands (V2)
 
 On OpenCode 2.x (Desktop **and** terminal TUI) the plugin registers two slash
@@ -225,6 +229,9 @@ Notes — these reflect what the plugin API actually exposes today:
   therefore delivers everything through the log file, the TUI sidebar and the
   `/context` / `/context-breakdown` slash commands. The sidebar is a TUI-process
   slot and does not exist in the Desktop app; the slash commands work in **both**.
+  The TUI sidebar is **live only for a `file://` install** from a path outside
+  `node_modules`; on the npm path it is auto-disabled (upstream `#33884`) — see
+  [Live sidebar: npm vs file:// install](#live-sidebar-npm-vs-file-install).
 * **V1 has no sidebar and no slash command.** The command/slot API (and the
   `./tui` entry) is a V2 feature; OpenCode 1.x has no equivalent, so V1 is
   toast + log only.
@@ -275,12 +282,54 @@ or add it to `opencode.jsonc`:
 ```
 
 The `./tui` sidebar entry is loaded automatically alongside the main plugin in
-the terminal TUI. For a CLI-only setup against remote servers, the package can
-also be listed in [`cli.json`](https://opencode.ai/v2/docs/cli/plugins):
+the terminal TUI — but its live behaviour depends on the install method, see
+[Live sidebar: npm vs file:// install](#live-sidebar-npm-vs-file-install) below.
+For a CLI-only setup against remote servers, the package can also be listed in
+[`cli.json`](https://opencode.ai/v2/docs/cli/plugins):
 
 ```json
 { "plugins": ["opencode-context-indicator"] }
 ```
+
+### Live sidebar: npm vs file:// install
+
+The TUI sidebar is a **TUI-process slot**. On OpenCode 2.x it behaves
+differently depending on **how the plugin was installed** — an upstream OpenCode
+limitation (`anomalyco/opencode#33884`), not a plugin bug: OpenCode's TUI loader
+skips the host Solid transform for any path inside a `node_modules` directory, so
+a slot mounted from an npm install renders once and then never live-updates.
+
+| Install | Desktop | TUI commands | TUI live sidebar |
+| --- | :---: | :---: | :---: |
+| npm (`opencode plugin add opencode-context-indicator`) | ✅ | ✅ | ❌ auto-disabled (upstream #33884) |
+| `file://` (path **outside** any `node_modules`) | ✅ | ✅ | ✅ live |
+
+On the **npm** path the plugin detects that it lives under `node_modules` and
+**disables the sidebar gracefully** — it logs a single hint and registers no
+slot, so you never see a frozen "no data yet" panel. The `/context` /
+`/context-breakdown` slash commands and the breakdown log file keep working on
+every install.
+
+#### Getting the live sidebar (`file://` install)
+
+1. Put the package **outside** any `node_modules`: clone the repository, or
+   unpack the npm tarball (`npm pack opencode-context-indicator`, then extract
+   the `.tgz`) — e.g. into `C:\Users\you\plugins\opencode-context-indicator`.
+   Double-check that the chosen path contains **no `node_modules` segment**
+   (e.g. `C:\Users\you\plugins\...`, not `.../node_modules/...`).
+2. Point OpenCode at that directory in `~/.config/opencode/opencode.jsonc`:
+
+   ```jsonc
+   {
+     "plugins": ["file:///C:/Users/you/plugins/opencode-context-indicator"]
+   }
+   ```
+
+3. Restart OpenCode. The sidebar is now live and updates as context grows.
+
+> ⚠️ The `file://` path must **not** contain a `node_modules` segment. If it
+> does, OpenCode skips the Solid transform and the sidebar will not update; the
+> plugin auto-disables it and logs the hint above.
 
 ### OpenCode 1.x (V1)
 
@@ -303,9 +352,11 @@ helper resolves. The `lib/` folder is support code, not a separate plugin entry:
 ~/.config/opencode/plugins/lib/dedup.js
 ```
 
-To use the sidebar locally as well, place `tui.tsx` where your OpenCode
-installation resolves the package's `./tui` entry (npm install is the
-recommended path for the sidebar).
+To use the sidebar locally as well, point OpenCode at a `file://` copy of the
+package that lives **outside any `node_modules`** (see
+[Live sidebar: npm vs file:// install](#live-sidebar-npm-vs-file-install)) — that
+is the only install path that keeps the sidebar live. An npm install auto-disables
+the sidebar instead.
 
 ---
 
@@ -322,9 +373,17 @@ recommended path for the sidebar).
 * **OpenCode ≥ 2.0.16** for the V2 path (built and verified against
   **2.0.19**).
 * **TUI sidebar**: terminal TUI only, requires the OpenTUI rendering stack that
-  ships with OpenCode (`@opentui/core`, `@opentui/solid`, `solid-js`). These are
-  declared as **optional** peer dependencies, so the main plugin installs and
-  runs fine without them (the sidebar simply is not available).
+  ships with OpenCode. `@opentui/core` and `solid-js` are **optional** peer
+  dependencies resolved by OpenCode at runtime; the main plugin installs and runs
+  fine without them (the sidebar simply is not available). `@opentui/solid` is
+  instead shipped as a **pinned direct dependency** (exact `0.5.12`): OpenCode's
+  TUI loader does not expose a host instance of it, so for npm-installed plugins
+  the JSX pragma would otherwise fail to resolve `@opentui/solid/jsx-runtime`
+  (upstream: opencode issue #33884 — `node_modules` plugins are excluded from the
+  host Solid transform and get an isolated OpenTUI copy). Because of that same
+  upstream limitation, on the **npm** path the sidebar is **auto-disabled**
+  (the plugin logs one hint and registers no slot) — use a `file://` install for
+  the live sidebar, see [Live sidebar: npm vs file:// install](#live-sidebar-npm-vs-file-install).
 
 ---
 

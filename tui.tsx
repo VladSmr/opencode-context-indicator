@@ -23,8 +23,19 @@
  * file renders "no data yet". The main plugin never imports this file, so the
  * absence of the OpenTUI peers cannot break the server/V1 path.
  *
- * Peer requirements (declared optional in package.json): @opentui/core,
- * @opentui/solid, solid-js.
+ * Runtime requirements: @opentui/core and solid-js are optional peers resolved
+ * by OpenCode at runtime. @opentui/solid is a pinned direct dependency (exact
+ * 0.5.12): OpenCode's TUI loader does not expose a host instance of it, so for
+ * npm-installed plugins the JSX pragma would otherwise fail to resolve
+ * `@opentui/solid/jsx-runtime` (upstream opencode issue #33884).
+ *
+ * Graceful mode: when this file is loaded from an npm install (its own path is
+ * inside a `node_modules` directory), OpenCode skips the host Solid transform
+ * for `node_modules` paths, so a mounted slot renders once and then never
+ * live-updates (anomalyco/opencode#33884). Rather than freeze a permanent
+ * "no data yet" panel, the entry detects that case, logs a single hint and
+ * registers no slot. Install via `file://` from a path outside any
+ * `node_modules` for the live sidebar (see README → "Live sidebar").
  */
 import {Plugin, usePlugin} from "@opencode/plugin/tui"
 import {createSignal, Show} from "solid-js"
@@ -32,10 +43,24 @@ import type {ColorInput} from "@opentui/core"
 import {readFileSync} from "node:fs"
 import {tmpdir} from "node:os"
 import {join} from "node:path"
+import {fileURLToPath} from "node:url"
 
 const STATE_FILE = join(tmpdir(), "opencode-context-indicator-state.json")
 const POLL_MS = 1000
 const LABEL_WIDTH = 12
+
+// True when this module was loaded from an npm install, i.e. its own file path
+// contains a `node_modules` segment (OpenCode's TUI loader skips the host Solid
+// transform for such paths → slots mount once but never live-update; see the
+// Graceful mode note above). Normalised to forward slashes for Windows paths.
+function isNodeModulesInstall(): boolean {
+  try {
+    const selfPath = fileURLToPath(import.meta.url).replace(/\\/g, "/").toLowerCase()
+    return selfPath.includes("/node_modules/")
+  } catch {
+    return false
+  }
+}
 
 type Categories = {
   user?: number
@@ -163,6 +188,19 @@ function Sidebar(props: { entry: () => StateEntry | null }) {
 export default Plugin.define({
   id: "context-indicator.tui",
   setup(context) {
+    // npm installs (path under node_modules) cannot get live slot updates on
+    // this OpenCode version. Stay inert and log a single hint instead of
+    // registering a slot that would freeze on "no data yet".
+    if (isNodeModulesInstall()) {
+      console.log(
+        "[context-indicator] TUI sidebar disabled: npm-installed plugins cannot get " +
+          "live updates on this OpenCode version (anomalyco/opencode#33884). " +
+          'Install via file:// (see README → "Live sidebar") for the live sidebar. ' +
+          "Slash commands still work everywhere.",
+      )
+      return
+    }
+
     // Re-read the bridge file once per second and re-render reactively.
     const [tick, setTick] = createSignal(0)
     let currentSession: string | undefined
