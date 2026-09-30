@@ -6,6 +6,9 @@
  *   (b) tui.tsx transpiles with the Solid pragma intact
  *   (c) resolve chain — @opentui/solid + solid-js resolvable from tui.tsx context
  *   (d) unit-harness T1–T12 for the limit/agent/state fixes
+ *   (e) corporate-identifier scan (8 files)
+ *   (f) non-English scan — no non-ASCII letters (any language other than
+ *       English) anywhere in the published surface or the test tree
  *
  * Skip with:  npm publish --ignore-scripts
  *             (useful for testing the pack output without running checks)
@@ -411,6 +414,40 @@ if (hits.length) {
   fatal(`corporate identifier(s) found in repo (${hits.length}): ${hits.join(", ")}`);
 }
 pass(`no corporate identifiers in ${scanFiles.length} scanned files`);
+
+// ---------------------------------------------------------------------------
+// (f) non-English scan. The plugin code and its published surface must contain
+// nothing in any language other than English. Implementation: flag any
+// non-ASCII LETTER (\p{L} with a code point above U+007F) — this catches
+// Cyrillic/CJK/Arabic/etc. words while allowing typographic punctuation
+// (em-dash, ellipsis, arrows, checkmarks) that English text legitimately uses.
+// The regex uses \u escapes and \p classes only — this source can never trip
+// itself (same trick as the corporate-identifier guard above).
+// ---------------------------------------------------------------------------
+console.log("\n(f) non-English scan...");
+const NON_ASCII = /[^\x00-\x7F]/;
+const NON_ASCII_LETTER = /\p{L}/u;
+const nonEnglishHits = [];
+for (const rel of scanFiles) {
+  let text;
+  try { text = readFileSync(join(repoRoot, rel), "utf8"); } catch { continue; }
+  text.split("\n").forEach((line, i) => {
+    if (!NON_ASCII.test(line)) return;
+    for (const ch of line) {
+      if (ch.codePointAt(0) > 0x7f && NON_ASCII_LETTER.test(ch)) {
+        nonEnglishHits.push(`${rel}:${i + 1}`);
+        break;
+      }
+    }
+  });
+}
+if (nonEnglishHits.length) {
+  fatal(
+    `non-English (non-ASCII letter) text found in repo (${nonEnglishHits.length}): ` +
+      `${nonEnglishHits.slice(0, 10).join(", ")}${nonEnglishHits.length > 10 ? " ..." : ""}`,
+  );
+}
+pass(`no non-ASCII letters in ${scanFiles.length} scanned files`);
 
 // Cleanup isolated harness state file only — never the live state.json.
 try { unlinkSync(HARNESS_STATE); } catch { /* ok */ }

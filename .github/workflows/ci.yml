@@ -20,9 +20,10 @@ jobs:
 
       - run: npm ci
 
-      # Run the full prepublish gate (a–e): tarball composition, tui.tsx
+      # Run the full prepublish gate (a–f): tarball composition, tui.tsx
       # pragma regression check via the esbuild PROGRAMMATIC API, resolve
-      # chain, unit harness T1–T12 and the corporate-identifier scan.
+      # chain, unit harness T1–T12, the corporate-identifier scan and the
+      # non-English (non-ASCII letter) scan.
       # Single source of truth, identical on Windows and Linux: the API
       # spawns the native esbuild binary with correct executable semantics
       # instead of `node <cli-bin>`, which breaks on Linux (ELF vs JS).

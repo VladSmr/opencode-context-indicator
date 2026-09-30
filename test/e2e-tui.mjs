@@ -120,6 +120,23 @@ function killTree(p) {
  *                (a long log line can be delivered across several conpty chunks)
  * Returns { buf, exitCode, timedOut }.
  */
+// Quote ONE argument for the PowerShell command line so a value can never break
+// out of its token and inject commands (CWE-78). Safe bare tokens are left as-is;
+// anything else becomes a single-quoted PowerShell literal (embedded single
+// quotes doubled). This is defence-in-depth on top of the checkB format check.
+function psQuoteArg(arg) {
+  const s = String(arg);
+  if (/^[A-Za-z0-9._:\/@=+-]+$/.test(s)) return s;
+  return `'${s.replace(/'/g, "''")}'`;
+}
+
+// POSIX equivalent for the bash branch.
+function shQuoteArg(arg) {
+  const s = String(arg);
+  if (/^[A-Za-z0-9._:\/@=+-]+$/.test(s)) return s;
+  return `'${s.replace(/'/g, "'\\''")}'`;
+}
+
 function runPty(extraArgs, timeoutMs, isDone, graceMs = 0) {
   return new Promise((resolve) => {
     let buf = "";
@@ -127,8 +144,8 @@ function runPty(extraArgs, timeoutMs, isDone, graceMs = 0) {
     let graceTimer = null;
 
     const cliCmd = process.platform === "win32"
-      ? `& "${resolvedCliPath}" ${extraArgs.join(" ")}`
-      : `"${resolvedCliPath}" ${extraArgs.join(" ")}`;
+      ? `& ${psQuoteArg(resolvedCliPath)} ${extraArgs.map(psQuoteArg).join(" ")}`
+      : `${shQuoteArg(resolvedCliPath)} ${extraArgs.map(shQuoteArg).join(" ")}`;
     const shell = process.platform === "win32" ? "powershell.exe" : "/bin/bash";
     const shellArgs = process.platform === "win32"
       ? ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", cliCmd]
@@ -237,8 +254,20 @@ async function checkB() {
   const startMs = Date.now();
   const model = process.env.OPENCODE_E2E_MODEL;
 
+  // OPENCODE_E2E_MODEL ends up on a PowerShell command line (see runPty). Reject
+  // any value that is not a strict provider/model id so it can never carry
+  // shell metacharacters (quotes, ;, $, backtick, spaces, ...) — CWE-78.
+  const MODEL_RE = /^[\w.:@/-]{1,120}$/;
+  if (typeof model !== "string" || !MODEL_RE.test(model)) {
+    console.error(
+      "[FAIL] Check B: OPENCODE_E2E_MODEL must match ^[\\w.:@/-]{1,120}$ " +
+        "(no spaces/quotes/shell metacharacters).",
+    );
+    return false;
+  }
+
   const r = await runPty(
-    ["run", "\"Say OK\"", "--standalone", "--print-logs", "--model", model],
+    ["run", "Say OK", "--standalone", "--print-logs", "--model", model],
     STEP_TIMEOUT_MS,
   );
   const buf = r.buf;
