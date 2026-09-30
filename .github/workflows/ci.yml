@@ -20,53 +20,10 @@ jobs:
 
       - run: npm ci
 
-      # Run the unit harness + all prepublish checks (a–d).
+      # Run the full prepublish gate (a–e): tarball composition, tui.tsx
+      # pragma regression check via the esbuild PROGRAMMATIC API, resolve
+      # chain, unit harness T1–T12 and the corporate-identifier scan.
+      # Single source of truth, identical on Windows and Linux: the API
+      # spawns the native esbuild binary with correct executable semantics
+      # instead of `node <cli-bin>`, which breaks on Linux (ELF vs JS).
       - run: node test/prepublish.mjs
-
-      # Transpile tui.tsx and assert the pragma is respected:
-      #   - @opentui/solid/jsx-runtime present
-      #   - react/jsx-runtime absent
-      # This is a standalone script so it works on any OS (no esbuild CLI needed).
-      - name: tui.tsx pragma regression check
-        run: |
-          node --input-type=module << 'EOF'
-          import { execSync } from "node:child_process";
-          import { readFileSync, writeFileSync } from "node:fs";
-          import { join } from "node:path";
-
-          // Inline the transpilation check using esbuild from node_modules.
-          const esbuild = await import("esbuild");
-          const repoRoot = process.cwd();
-          const src = join(repoRoot, "tui.tsx");
-          const out = join("/tmp", "ci-tui-out.mjs");
-
-          const result = await esbuild.build({
-            entryPoints: [src],
-            jsx: "automatic",
-            format: "esm",
-            outfile: out,
-            write: true,
-          });
-
-          const code = readFileSync(out, "utf8");
-          const firstLine = readFileSync(src, "utf8").split("\n")[0];
-          const errors = [];
-
-          if (!code.includes("@opentui/solid/jsx-runtime")) {
-            errors.push("MISSING @opentui/solid/jsx-runtime — pragma may be missing or wrong");
-          }
-          if (code.includes("react/jsx-runtime")) {
-            errors.push("FOUND react/jsx-runtime — pragma regression (should use @opentui/solid)");
-          }
-          if (!firstLine.startsWith("/** @jsxImportSource @opentui/solid */")) {
-            errors.push("FIRST LINE is not the pragma: " + firstLine);
-          }
-
-          if (errors.length > 0) {
-            console.error("tui.tsx transpilation check FAILED:");
-            for (const e of errors) console.error("  ✗", e);
-            process.exit(1);
-          }
-          console.log("✓ tui.tsx transpiles correctly (@opentui/solid/jsx-runtime, no react)");
-          process.exit(0);
-          EOF

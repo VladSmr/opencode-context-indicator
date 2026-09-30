@@ -13,6 +13,7 @@
 
 import { execSync, spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync, unlinkSync, existsSync, readdirSync } from "node:fs";
+import { transformSync } from "esbuild";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -57,34 +58,27 @@ pass(`tarball: ${[...fileMembers].join(", ")} (6 members, no dev artifacts)`);
 
 // ---------------------------------------------------------------------------
 // (b) tui.tsx transpilation — pragma regression check
+//
+// Uses the esbuild PROGRAMMATIC API (transformSync), never `node <cli-bin>`.
+// The API resolves the native binary from `@esbuild/<platform>` and spawns it
+// as an executable with correct platform semantics (ELF/exe), identically on
+// Windows and Linux. The old code ran `node node_modules/esbuild/bin/esbuild`,
+// which works on Windows (JS shim) but fails on Linux where that path is the
+// native ELF binary — node then parses it as JS and throws
+// `SyntaxError: Invalid or unexpected token`.
 // ---------------------------------------------------------------------------
-console.log("\n(b) tui.tsx transpilation (esbuild --jsx=automatic)...");
-const esbuildBin = join(repoRoot, "node_modules", "esbuild", "bin", "esbuild");
-const tuiOut = join(tmpdir(), "oci-prepublish-tui-out.mjs");
-
-let esbuildErr = "";
-let esbuildOut = "";
-try {
-  const r = spawnSync(process.execPath, [
-    esbuildBin,
-    join(repoRoot, "tui.tsx"),
-    "--jsx=automatic", "--format=esm",
-    `--outfile=${tuiOut}`,
-  ], { cwd: repoRoot, encoding: "utf8" });
-  esbuildOut = (r.stdout || "").toString("utf8");
-  esbuildErr = (r.stderr || "").toString("utf8");
-} catch (e) {
-  esbuildErr = ((e.stderr || "") + (e.message || "")).toString("utf8");
-}
-if (esbuildErr && !esbuildErr.includes("Done") && !esbuildErr.includes("0 errors")) {
-  fatal(`esbuild failed: ${esbuildErr.slice(0, 300)}`);
-}
+console.log("\n(b) tui.tsx transpilation (esbuild transform, jsx=automatic)...");
+const tuiSource = readFileSync(join(repoRoot, "tui.tsx"), "utf8");
 
 let transpiled;
 try {
-  transpiled = readFileSync(tuiOut, "utf8");
-} catch {
-  fatal("could not read esbuild output");
+  transpiled = transformSync(tuiSource, {
+    loader: "tsx",
+    jsx: "automatic",
+    format: "esm",
+  }).code;
+} catch (e) {
+  fatal(`esbuild failed: ${((e && e.message) || String(e)).slice(0, 300)}`);
 }
 if (!transpiled.includes("@opentui/solid/jsx-runtime")) {
   fatal("transpiled output missing @opentui/solid/jsx-runtime — pragma may be missing");
@@ -101,7 +95,7 @@ if (transpiled.includes("react/jsx-runtime")) {
 if (/["']opencode(\/|["'])/.test(transpiled)) {
   fatal("transpiled output imports a bare 'opencode' specifier — not bridged at runtime");
 }
-const firstLine = readFileSync(join(repoRoot, "tui.tsx"), "utf8").split("\n")[0];
+const firstLine = tuiSource.split("\n")[0];
 if (!firstLine.startsWith("/** @jsxImportSource @opentui/solid */")) {
   fatal(`first line is not the pragma: ${firstLine}`);
 }
