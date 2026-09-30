@@ -45,7 +45,9 @@ import {tmpdir} from "node:os"
 import {join} from "node:path"
 import {fileURLToPath} from "node:url"
 
-const STATE_FILE = join(tmpdir(), "opencode-context-indicator-state.json")
+const STATE_FILE =
+  process.env.OPENCODE_CONTEXT_INDICATOR_STATE_FILE ||
+  join(tmpdir(), "opencode-context-indicator-state.json")
 const POLL_MS = 1000
 const LABEL_WIDTH = 12
 

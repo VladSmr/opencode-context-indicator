@@ -195,7 +195,13 @@ const LOG_FILE = join(tmpdir(), "context-breakdown.log");
 // Machine-readable snapshot consumed by the optional TUI sidebar (./tui.tsx,
 // package entry "./tui"). Written next to each log update — same moment, same
 // data. See writeStateFile() below.
-const STATE_FILE = join(tmpdir(), "opencode-context-indicator-state.json");
+// State file path — overridable via env for test isolation.
+// In production the env is never set, so behaviour is unchanged.
+// In tests: export OPENCODE_CONTEXT_INDICATOR_STATE_FILE=/tmp/test-state.json
+// and the harness writes a controlled seed; no live file is touched.
+const STATE_FILE =
+  process.env.OPENCODE_CONTEXT_INDICATOR_STATE_FILE ||
+  join(tmpdir(), "opencode-context-indicator-state.json");
 
 // Separate tap log for raw events (written only when DEBUG_EVENTS is true).
 const EVENT_LOG_FILE = join(tmpdir(), "context-events.log");
@@ -2008,15 +2014,15 @@ async function ensureModelLimits(ctx) {
         const withLimit = models.filter(
           (m) => m?.limit && typeof m.limit === "object",
         ).length;
-        const lanit = models.filter(
-          (m) => m?.providerID === "lanit" || m?.provider?.id === "lanit",
+        const withProvider = models.filter(
+          (m) => m?.providerID || m?.provider?.id,
         ).length;
         const seeded = hydrateModelLimitsFromState();
         v2LimitsFailCount++;
         v2LimitsFailAt = Date.now();
         logErr(
           "model.list yielded 0 usable limits — retrying",
-          { models: models.length, withLimit, lanit, hydratedFromState: seeded },
+          { models: models.length, withLimit, withProvider, hydratedFromState: seeded },
         );
       }
     } catch (err) {
@@ -2441,43 +2447,102 @@ function readStateSnapshot() {
 // cold instance, or one whose model registry did not expose the provider).
 // Without this, a transient list miss degraded every denominator to "?" — and
 // because writeStateFile used to rewrite usable/limit from the (empty) in-memory
-// map, the degradation became permanent. Strictly additive: real in-memory
-// records always win (never overwritten). Returns the number of records seeded.
+// map, the degradation became permanent.
+//
+// The snapshot also holds history: during an earlier outage some instances wrote
+// a WRONG usable window (e.g. 168000 instead of 1015808). A naive
+// first-match seed would then re-inject that stale garbage. Therefore, per
+// `<provider>:<model>`:
+//   * candidates are sanity-filtered (drop `usable >= limit`, `usable <= 0`);
+//   * when any candidate carries a precise `usable`, only those are considered;
+//   * the FRESHEST (max `updatedAt`) candidate wins;
+//   * a divergent spread (max > 3× min usable) is logged for diagnosis.
+// Strictly additive: real in-memory records always win (never overwritten).
+// Returns the number of records seeded.
 function hydrateModelLimitsFromState() {
   try {
     const all = readStateSnapshot();
-    let added = 0;
+    // Group candidate entries by key first, so "freshest" is decided against
+    // ALL records of that model — not the first one encountered.
+    const byKey = new Map(); // key -> [ { usable, limit, updatedAt } ]
     for (const entry of Object.values(all)) {
       const providerID =
         typeof entry?.providerID === "string" ? entry.providerID : "";
       const modelID = entry?.model;
       const key = modelKey(providerID, modelID);
       if (!key || !modelID || modelID === "unknown") continue;
-      if (modelLimits.has(key)) continue; // a real record always wins
-      // A state entry stores the derived usable window (`usable`) and the raw
-      // context window (`limit`) — NOT the input/output/reserved triple. Seed
-      // `usable` as `input` (reserved 0) so getUsableContext() re-derives EXACTLY
-      // the same denominator the warm instance persisted; seeding `limit` as
-      // context instead would let the cold instance show the raw context window
-      // (e.g. 200k) while the warm one shows the true usable window (e.g. 168k).
-      // Fall back to `limit` as context only when no `usable` was recorded.
+      if (modelLimits.has(key)) continue; // a real in-memory record always wins
       const usable =
         typeof entry?.usable === "number" && entry.usable > 0
           ? entry.usable
           : null;
-      const ctxLimit =
-        typeof entry?.limit === "number" && entry.limit > 0
-          ? entry.limit
-          : null;
+      const limit =
+        typeof entry?.limit === "number" && entry.limit > 0 ? entry.limit : null;
+      if (usable == null && limit == null) continue;
+      let arr = byKey.get(key);
+      if (!arr) {
+        arr = [];
+        byKey.set(key, arr);
+      }
+      arr.push({
+        usable,
+        limit,
+        updatedAt: typeof entry?.updatedAt === "string" ? entry.updatedAt : "",
+      });
+    }
+
+    let added = 0;
+    for (const [key, candidates] of byKey) {
+      // (b) Sanity: drop impossible records (usable >= limit, usable <= 0).
+      // Candidates without a usable (context-only) are kept as-is.
+      const sane = candidates.filter(
+        (c) =>
+          c.usable == null ||
+          (c.usable > 0 && (c.limit == null || c.usable <= c.limit)),
+      );
+      if (sane.length === 0) continue; // every record was impossible -> skip
+
+      // (a) Prefer the precise variant (a recorded usable) when any exists.
+      const precise = sane.filter((c) => c.usable != null);
+      const pool = precise.length > 0 ? precise : sane;
+
+      // (1) Freshest wins (ISO timestamps compare lexicographically).
+      let best = pool[0];
+      for (const c of pool) {
+        if (String(c.updatedAt) > String(best.updatedAt)) best = c;
+      }
+
+      // (c) Diagnostic: a >3× spread means the snapshot is polluted by a
+      // limited/fallback instance — log the numbers once for this model.
+      const usables = pool.map((c) => c.usable).filter((u) => u != null);
+      if (usables.length > 1) {
+        const max = Math.max(...usables);
+        const min = Math.min(...usables);
+        if (min > 0 && max / min > 3) {
+          logErr(
+            `limit seed spread for ${key} — using freshest`,
+            { min, max, candidates: pool.length, chosen: best.usable ?? best.limit },
+          );
+        }
+      }
+
+      // Build the record: precise usable-as-input when known (so getUsableContext
+      // re-derives EXACTLY the persisted window), else the raw context window.
       let rec = null;
-      if (usable != null) {
-        rec = { context: ctxLimit, input: usable, output: null, reserved: 0 };
-      } else if (ctxLimit != null) {
-        rec = { context: ctxLimit, input: null, output: null, reserved: null };
+      if (best.usable != null) {
+        rec = { context: best.limit, input: best.usable, output: null, reserved: 0 };
+      } else if (best.limit != null) {
+        rec = { context: best.limit, input: null, output: null, reserved: null };
       }
       if (rec == null) continue;
       modelLimits.set(key, rec);
       added++;
+      // (3) One seed line per model: chosen value + provenance.
+      console.log(
+        `[context-indicator] limit seed ${key} -> usable=${
+          best.usable != null ? best.usable : best.limit
+        } (from ${best.updatedAt || "unknown"}, ${pool.length} candidates)`,
+      );
     }
     return added;
   } catch {
@@ -2874,6 +2939,29 @@ async function commandContextBreakdown(ctx, invocation, opts) {
     logErr("context-breakdown command failed", err);
   }
 }
+
+// ---------------------------------------------------------------------------
+// Named exports for the prepublish unit harness (test/prepublish.mjs).
+// These are module-level const variables that the harness needs to mutate
+// (modelLimits, sessionAgentCache, etc.) and functions it needs to call
+// directly (hydrateModelLimitsFromState, writeStateFile, etc.).
+// The plugin itself works without any of these — they are additive.
+// ---------------------------------------------------------------------------
+export {
+  modelLimits,
+  sessionAgentCache,
+  sessionParentCache,
+  writeStateFile,
+  hydrateModelLimitsFromState,
+  getUsableContext,
+  getModelLimit,
+  collectSessionReport,
+  renderSessionRow,
+  shortSummaryText,
+  shortSummaryDescription,
+  ensureModelLimits,
+  readStateSnapshot,
+};
 
 // ---------------------------------------------------------------------------
 // Entrypoints

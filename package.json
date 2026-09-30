@@ -1,6 +1,6 @@
 {
   "name": "opencode-context-indicator",
-  "version": "1.1.3",
+  "version": "1.1.4",
   "description": "Real-time OpenCode context-window usage indicator: per-category token breakdown written to a log file, plus an optional TUI sidebar. Dual V1 + V2 plugin entry.",
   "type": "module",
   "license": "MIT",
@@ -31,9 +31,14 @@
     "access": "public"
   },
   "author": "VladSmr",
-  "repository": { "type": "git", "url": "git+https://github.com/VladSmr/opencode-context-indicator.git" },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/VladSmr/opencode-context-indicator.git"
+  },
   "homepage": "https://github.com/VladSmr/opencode-context-indicator#readme",
-  "bugs": { "url": "https://github.com/VladSmr/opencode-context-indicator/issues" },
+  "bugs": {
+    "url": "https://github.com/VladSmr/opencode-context-indicator/issues"
+  },
   "peerDependencies": {
     "@opencode/plugin": ">=2.0.16",
     "@opentui/core": ">=0.5.12",
@@ -56,6 +61,14 @@
   "devDependencies": {
     "@opencode/plugin": "^2.0.19",
     "@opentui/core": "^0.5.12",
+    "esbuild": "^0.28.2",
+    "node-pty": "^1.1.0",
     "solid-js": "^1.9.12"
-  }
+  },
+  "scripts": {
+    "test:prepublish": "node test/prepublish.mjs",
+    "test:e2e": "node test/e2e-tui.mjs --full",
+    "test:e2e:quick": "node test/e2e-tui.mjs --quick"
+  },
+  "prepublishOnly": "node test/prepublish.mjs && node test/e2e-tui.mjs --full"
 }
