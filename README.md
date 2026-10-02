@@ -9,7 +9,7 @@ arguments and the residual "other" bucket.
 
 The package ships a **dual V1 + V2 plugin** (one entry works in both OpenCode
 generations) plus an optional TUI sidebar module exposed as the `./tui` entry.
-The V2 path is **tested against opencode v2.0.19**; the V1 path against 1.18.29+.
+The V2 path is **tested against opencode v2.0.21**; the V1 path against 1.18.29+.
 
 ![TUI sidebar — per-category context breakdown](docs/sidebar.png)
 
@@ -378,12 +378,13 @@ the sidebar instead.
   gracefully (the breakdown falls back to throttled `session.messages` fetches
   and toasts keep working).
 * **OpenCode ≥ 2.0.16** for the V2 path (built and verified against
-  **2.0.19**).
+  **2.0.21**).
 * **TUI sidebar**: terminal TUI only, requires the OpenTUI rendering stack that
   ships with OpenCode. `@opentui/core` and `solid-js` are **optional** peer
   dependencies resolved by OpenCode at runtime; the main plugin installs and runs
   fine without them (the sidebar simply is not available). `@opentui/solid` is
-  instead shipped as a **pinned direct dependency** (exact `0.5.12`): OpenCode's
+  instead shipped as a **pinned direct dependency** (exact `0.5.14`, matching
+  the OpenTUI stack OpenCode 2.0.21 ships): OpenCode's
   TUI loader does not expose a host instance of it, so for npm-installed plugins
   the JSX pragma would otherwise fail to resolve `@opentui/solid/jsx-runtime`
   (upstream: opencode issue #33884 — `node_modules` plugins are excluded from the
