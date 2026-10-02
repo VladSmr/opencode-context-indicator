@@ -38,26 +38,41 @@ console.log("\n(a) Tarball composition...");
 const pkgMeta = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8"));
 const declaredFiles = pkgMeta.files || [];
 // Expand any directory-wildcard entries to their expected member(s).
-// e.g. "lib/" -> "lib/dedup.js"; "subdir/" -> all members under that prefix.
-// We only expect "lib/" here.
+// e.g. "lib/" -> every regular file under lib/; "subdir/" -> all members under
+// that prefix. We only expect "lib/" here. The base published set is
+// LICENSE, README.md, index.js, package.json, tui.tsx (5 files); the lib/
+// member count is computed from the directory so the index.js module split is
+// reflected automatically instead of needing a hardcoded number.
+const BASE_MEMBER_COUNT = 5;
 const fileMembers = new Set(["LICENSE","README.md","index.js","package.json","tui.tsx"]);
+let libMemberCount = 0;
 declaredFiles.forEach((f) => {
   if (f === "lib/") {
-    fileMembers.add("lib/dedup.js");
+    const libAbs = join(repoRoot, "lib");
+    if (!existsSync(libAbs)) {
+      fatal(`package.json declares "lib/" but ${libAbs} is missing`);
+    }
+    for (const ent of readdirSync(libAbs, { withFileTypes: true })) {
+      if (ent.isFile()) {
+        fileMembers.add(`lib/${ent.name}`);
+        libMemberCount++;
+      }
+    }
   } else if (!f.endsWith("/")) {
     fileMembers.add(f);
   }
-  // directory wildcards that expand to multiple files are not used in this repo.
+  // directory wildcards other than "lib/" are not used in this repo.
 });
-if (fileMembers.size !== 6) {
-  fatal(`expected 6 tarball members, got ${fileMembers.size}: ${[...fileMembers].join(", ")}`);
+const expectedMembers = BASE_MEMBER_COUNT + libMemberCount;
+if (fileMembers.size !== expectedMembers) {
+  fatal(`expected ${expectedMembers} tarball members, got ${fileMembers.size}: ${[...fileMembers].join(", ")}`);
 }
 const bad = [...fileMembers].filter(
   (f) => f.includes("node_modules") || f.includes("test/") ||
          f.includes("tsconfig") || f.includes(".git"),
 );
 if (bad.length) fatal(`package.json files includes dev/test artifacts: ${bad.join(", ")}`);
-pass(`tarball: ${[...fileMembers].join(", ")} (6 members, no dev artifacts)`);
+pass(`tarball: ${[...fileMembers].join(", ")} (${fileMembers.size} members, no dev artifacts)`);
 
 // ---------------------------------------------------------------------------
 // (b) tui.tsx transpilation — pragma regression check
