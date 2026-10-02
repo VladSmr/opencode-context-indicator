@@ -14,7 +14,9 @@
  * loading"). OpenCode loads it only in the terminal TUI; it is NOT loaded in
  * the Desktop app (Desktop exposes no TUI slot API). It renders the
  * per-category context breakdown produced by the server plugin (index.js) into
- * the session sidebar via `append: "sidebar.content"`.
+ * the session sidebar via `append: "sidebar.content"` and into a full session
+ * panel (`append: "session.panel"`) opened by the `cx` slash command / keymap
+ * layer registered from an `append: "app"` slot.
  *
  * Data bridge: the server plugin rewrites
  *   %TEMP%/opencode-context-indicator-state.json
@@ -34,15 +36,16 @@
  * for `node_modules` paths, so a mounted slot renders once and then never
  * live-updates (anomalyco/opencode#33884). Rather than freeze a permanent
  * "no data yet" panel, the entry detects that case, logs a single hint and
- * registers no slot. Install via `file://` from a path outside any
- * `node_modules` for the live sidebar (see README → "Live sidebar").
+ * registers no slot (neither the sidebar nor the session panel). Install via
+ * `file://` from a path outside any `node_modules` for the live surfaces (see
+ * README → "Live sidebar").
  */
 import {Plugin, usePlugin} from "@opencode/plugin/tui"
-import {createSignal, Show} from "solid-js"
+import {createMemo, createSignal, Show} from "solid-js"
 import type {ColorInput} from "@opentui/core"
-import {readFileSync} from "node:fs"
+import {mkdirSync, readFileSync, writeFileSync} from "node:fs"
 import {tmpdir} from "node:os"
-import {join} from "node:path"
+import {basename, join} from "node:path"
 import {fileURLToPath} from "node:url"
 
 const STATE_FILE =
@@ -50,6 +53,11 @@ const STATE_FILE =
   join(tmpdir(), "opencode-context-indicator-state.json")
 const POLL_MS = 1000
 const LABEL_WIDTH = 12
+
+// Session-panel contribution name. Session-panel names are shared selection
+// values (not registered claims), so it MUST be plugin-prefixed to avoid
+// colliding with another plugin's panel.
+const PANEL_NAME = "context-indicator.breakdown"
 
 // True when this module was loaded from an npm install, i.e. its own file path
 // contains a `node_modules` segment (OpenCode's TUI loader skips the host Solid
@@ -76,6 +84,9 @@ type Categories = {
 
 type StateEntry = {
   sessionID?: string
+  parentID?: string | null
+  role?: string
+  agent?: string | null
   model?: string
   providerID?: string
   ctx?: number
@@ -106,29 +117,324 @@ function token(v: unknown, fallback: Fg): Fg {
   return v && typeof v === "object" ? (v as Fg) : fallback
 }
 
-// Read the snapshot entry for one session. Never throws: a missing, empty or
-// corrupt state file simply yields null ("no data yet").
-function readEntry(sessionID: string | undefined): StateEntry | null {
-  if (!sessionID) return null
+// Reserved object keys must never be treated as session ids: state.json is
+// untrusted input (mirrors isSafeSessionKey() in lib/estimate.js).
+function isSafeKey(k: string): boolean {
+  return k !== "__proto__" && k !== "constructor" && k !== "prototype"
+}
+
+// Whole state.json snapshot ({ sessionID: entry }) or {} on any error. The
+// sidebar resolves one entry from it and the breakdown panel walks the
+// parentID family over it. Never throws — a missing / empty / corrupt
+// file simply yields {}.
+function readSnapshot(): Record<string, StateEntry> {
   try {
     const raw = readFileSync(STATE_FILE, "utf8")
     const all = JSON.parse(raw) as Record<string, StateEntry>
-    if (!all || typeof all !== "object" || Array.isArray(all)) return null
-    const entry = all[sessionID]
-    return entry && typeof entry === "object" ? entry : null
+    if (!all || typeof all !== "object" || Array.isArray(all)) return {}
+    // Rebuild into a fresh plain object: drops prototype-poisoning keys
+    // (__proto__ / constructor / prototype) and non-object entries in one pass.
+    const clean: Record<string, StateEntry> = {}
+    for (const [k, v] of Object.entries(all)) {
+      if (isSafeKey(k) && v && typeof v === "object") clean[k] = v
+    }
+    return clean
   } catch {
-    return null
+    return {}
+  }
+}
+
+// True when an entry carries no measured tokens at all (a registered session
+// that never served a step). Mirrors isEmptyStateEntry() in lib/commands.js:
+// `categories` is always persisted, so the emptiness test SUMS its fields —
+// a missing categories object is not the only trigger. `system` / `toolSchemas`
+// may legitimately be null, hence the num() coercion.
+function isEmptyEntry(e: StateEntry | undefined): boolean {
+  const c = e?.categories
+  const sum =
+    num(c?.user) +
+    num(c?.assistant) +
+    num(c?.reasoning) +
+    num(c?.toolArgs) +
+    num(c?.system) +
+    num(c?.toolSchemas) +
+    num(c?.other)
+  return sum === 0 && num(e?.ctx) === 0 && num(e?.input) === 0
+}
+
+// The panel row set: the root entry (panel.sessionID) plus every entry whose
+// parentID chain reaches it, breadth-first. A small local walk over the snapshot
+// — the server's collectDescendantSessionIDs lives in lib/commands.js and is NOT
+// imported here (tui.tsx stays independent of the server code by design). A
+// phantom node (no tokens, see isEmptyEntry) is not emitted, but traversal still
+// descends through it so real grandchildren behind it are found. `seen` guards
+// against cycles (parentID loops) and double-listing.
+function collectFamily(
+  snapshot: Record<string, StateEntry>,
+  rootID: string,
+): StateEntry[] {
+  const out: StateEntry[] = []
+  const root = snapshot[rootID]
+  if (root && typeof root === "object") out.push(root)
+  const seen = new Set<string>([rootID])
+  const queue: string[] = [rootID]
+  // Index the snapshot by parentID once (O(n)) instead of an O(n) scan per node.
+  const byParent = new Map<string, string[]>()
+  for (const [id, e] of Object.entries(snapshot)) {
+    const pid = e?.parentID
+    if (!pid || typeof pid !== "string") continue
+    const kids = byParent.get(pid)
+    if (kids) kids.push(id)
+    else byParent.set(pid, [id])
+  }
+  while (queue.length > 0) {
+    const cur = queue.shift() as string
+    const kids = byParent.get(cur)
+    if (!kids) continue
+    for (const id of kids) {
+      if (!id || seen.has(id)) continue
+      seen.add(id)
+      const e = snapshot[id]
+      if (e && !isEmptyEntry(e)) out.push(e)
+      queue.push(id) // descend through phantom parents too
+    }
+  }
+  return out
+}
+
+// One-line sanitisation for untrusted labels (agent / model) rendered in the
+// panel: drop zero-width + bidi control chars, collapse C0/C1 controls (incl.
+// CR/LF/TAB) and the line/paragraph separators to spaces, then cap the result at
+// 32 code points (code-point safe). Only labels are ever rendered — never
+// message content.
+function safeText(v: unknown): string {
+  try {
+    const s = v == null ? "" : String(v)
+    const cleaned = s
+      .replace(/[\u200B-\u200F\u202A-\u202E\u2066-\u2069]/g, "")
+      .replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]/g, " ")
+    const cps = Array.from(cleaned)
+    return cps.length > 32 ? `${cps.slice(0, 31).join("")}~` : cleaned
+  } catch {
+    return ""
   }
 }
 
 function updatedAt(iso: string | undefined): string {
   if (!iso) return "?"
   try {
-    return new Date(iso).toLocaleTimeString()
+    const d = new Date(iso)
+    return Number.isNaN(d.getTime()) ? "?" : d.toLocaleTimeString()
   } catch {
     return "?"
   }
 }
+
+// Code-point-safe column fit: truncate on code points (never splitting a
+// surrogate pair at a column boundary), mark a truncated cell with a trailing
+// "~" so clipping is VISIBLE (a silently clipped cell reads as two columns
+// colliding), then pad to the column width.
+function fit(s: string, w: number): string {
+  const cps = Array.from(s)
+  if (cps.length > w) return `${cps.slice(0, Math.max(0, w - 1)).join("")}~`
+  return s.padEnd(w)
+}
+
+// ---------------------------------------------------------------------------
+// Measured contributors (TUI-only). The TUI data layer already holds the
+// session's live message list in-process, so the panel can char-count each
+// message part WITHOUT an LLM call and WITHOUT shipping message text anywhere.
+// Only the char count, the message ordinal and a kind string leave
+// measureContributors(); message text is read, measured and discarded. Tool
+// RESULT outputs are counted here — the server's state.json categories never
+// see them — which is what makes the residual `other` explicable.
+// ---------------------------------------------------------------------------
+
+type Contributor = {
+  kind: string
+  ref: string
+  chars: number
+  tokensEstimate: number
+  // Tool name for the tool-args / tool-result buckets (e.g. "bash"), else "".
+  tool: string
+  // First characters of THIS bucket's text, control chars stripped. Rendered
+  // on the user's own screen only — exportRedacted() never includes it.
+  preview: string
+}
+
+// Local copy of the token-estimate core (estimateTokens in lib/estimate.js).
+// tui.tsx is loaded standalone and must NOT import lib/*, so the ~20-line
+// three-density unicode heuristic is duplicated on purpose: Cyrillic ~2.5,
+// CJK ~1.5, latin/ASCII ~4 chars/token. Heuristic, not a tokenizer.
+function estimateTokensLocal(s: string): number {
+  let other = 0
+  let cyr = 0
+  let cjk = 0
+  for (let i = 0; i < s.length; i++) {
+    const cp = s.codePointAt(i) as number
+    if (cp > 0xffff) i++ // astral pair: consume the low surrogate
+    if (cp < 0x80) other++
+    else if (
+      (cp >= 0x0400 && cp <= 0x04ff) || // Cyrillic
+      (cp >= 0x0500 && cp <= 0x052f) || // Cyrillic Supplement
+      (cp >= 0x2de0 && cp <= 0x2dff) || // Cyrillic Extended-A
+      (cp >= 0xa640 && cp <= 0xa69f) || // Cyrillic Extended-B
+      (cp >= 0x1c80 && cp <= 0x1c8f) // Cyrillic Extended-C
+    )
+      cyr++
+    else if (
+      (cp >= 0x4e00 && cp <= 0x9fff) || // CJK Unified Ideographs
+      (cp >= 0x3400 && cp <= 0x4dbf) || // CJK Extension A
+      (cp >= 0xf900 && cp <= 0xfaff) || // CJK Compatibility Ideographs
+      (cp >= 0x3040 && cp <= 0x30ff) || // Hiragana + Katakana
+      (cp >= 0xac00 && cp <= 0xd7af) || // Hangul Syllables
+      (cp >= 0x3000 && cp <= 0x303f) || // CJK Symbols and Punctuation
+      (cp >= 0xff00 && cp <= 0xffef) // Halfwidth/Fullwidth Forms
+    )
+      cjk++
+    else other++
+  }
+  return Math.round(other / 4 + cyr / 2.5 + cjk / 1.5)
+}
+
+// Live message data is untrusted: coerce every field defensively, never throw.
+function asRecord(v: unknown): Record<string, unknown> | null {
+  return v && typeof v === "object" ? (v as Record<string, unknown>) : null
+}
+
+// Char counts per (message, bucket). `asst.text` = assistant text,
+// `asst.rsn` = reasoning, `asst.tool` = tool CALL arguments (streaming raw
+// string or JSON.stringify of the input object), `asst.result` = tool RESULT
+// outputs (text content of completed/error tool states). Sorted descending by
+// estimated tokens.
+function measureContributors(messages: readonly unknown[]): Contributor[] {
+  const out: Contributor[] = []
+  // Single-line, bounded preview of the bucket text: control chars (incl.
+  // CR/LF/TAB and line separators) collapse to spaces, bidi/zero-width stripped,
+  // capped at 26 code points with a "~" tail. Local rendering only. An explicit
+  // override (e.g. "" for raw tool-args JSON) suppresses the preview.
+  const previewOf = (sample: string): string => {
+    const cleaned = sample
+      .replace(/[\u200B-\u200F\u202A-\u202E\u2066-\u2069]/g, "")
+      .replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]+/g, " ")
+      .trim()
+    const cps = Array.from(cleaned)
+    return cps.length > 26 ? `${cps.slice(0, 25).join("")}~` : cleaned
+  }
+  const add = (
+    kind: string,
+    ref: string,
+    sample: string,
+    tool = "",
+    previewOverride?: string,
+  ) => {
+    if (sample.length === 0) return
+    out.push({
+      kind,
+      ref,
+      chars: sample.length,
+      tokensEstimate: estimateTokensLocal(sample),
+      tool,
+      preview: previewOverride ?? previewOf(sample),
+    })
+  }
+  // Human clock ref: "21:04" from the message's own creation time — far more
+  // actionable than an array ordinal. Falls back to "#N" when time is absent.
+  const hhmm = (ms: unknown): string => {
+    if (typeof ms !== "number" || !Number.isFinite(ms) || ms <= 0) return ""
+    try {
+      const d = new Date(ms)
+      if (Number.isNaN(d.getTime())) return ""
+      const pad = (x: number) => String(x).padStart(2, "0")
+      return `${pad(d.getHours())}:${pad(d.getMinutes())}`
+    } catch {
+      return ""
+    }
+  }
+  for (let i = 0; i < messages.length; i++) {
+    const m = asRecord(messages[i])
+    if (!m) continue
+    const timeRec = asRecord(m.time)
+    const ref = hhmm(timeRec?.created) || `#${i + 1}`
+    const type = typeof m.type === "string" ? m.type : ""
+    if (type === "user") {
+      if (typeof m.text === "string") add("user.text", ref, m.text)
+      continue
+    }
+    if (type !== "assistant") continue
+    const content = Array.isArray(m.content) ? m.content : []
+    let text = ""
+    let rsn = ""
+    for (const rawPart of content) {
+      const part = asRecord(rawPart)
+      if (!part) continue
+      const pt = typeof part.type === "string" ? part.type : ""
+      if (pt === "text") {
+        if (typeof part.text === "string") text += part.text
+      } else if (pt === "reasoning") {
+        if (typeof part.text === "string") rsn += part.text
+      } else if (pt === "tool") {
+        const state = asRecord(part.state)
+        if (!state) continue
+        // Per-tool-part contributors: each tool call carries its own name and
+        // measured size (one message can hold several tool calls). The raw
+        // args JSON is measured but NOT previewed — the tool name is the
+        // useful identifier; result text previews fine.
+        const toolName =
+          typeof part.name === "string" && part.name ? safeText(part.name) : ""
+        let tool = ""
+        let result = ""
+        if (typeof state.input === "string") {
+          tool += state.input
+        } else if (state.input != null) {
+          try {
+            tool += JSON.stringify(state.input) ?? ""
+          } catch {
+            /* unstringifiable input: skip its chars */
+          }
+        }
+        const c = state.content
+        if (Array.isArray(c)) {
+          for (const rawItem of c) {
+            const item = asRecord(rawItem)
+            if (item && item.type === "text" && typeof item.text === "string")
+              result += item.text
+          }
+        }
+        add("asst.tool", ref, tool, toolName, "") // raw args JSON: no preview
+        add("asst.result", ref, result, toolName)
+      }
+    }
+    add("asst.text", ref, text)
+    add("asst.rsn", ref, rsn)
+  }
+  return out.sort((a, b) => b.tokensEstimate - a.tokensEstimate)
+}
+
+// Human line for one measured contributor: role in full words, the message's
+// own clock time, the bucket (with the tool name for tool buckets), the token
+// estimate, and a bounded single-line preview of THIS bucket only. Never
+// contains a full session id or file paths.
+function contributorLine(c: Contributor, rank: number): string {
+  const [who, bucket] = c.kind.split(".")
+  const role = who === "asst" ? "assistant" : who
+  const what =
+    bucket === "rsn"
+      ? "reasoning"
+      : bucket === "tool"
+        ? "tool args"
+        : bucket === "result"
+          ? "tool result"
+          : ""
+  const tool = c.tool ? ` (${c.tool})` : ""
+  const whatFull = what ? `${what}${tool}` : ""
+  const head = `${rank}. ${role} ${c.ref}${whatFull ? ` ${whatFull}` : ""} \u2014 ${fmt(c.tokensEstimate)}`
+  return c.preview ? `${head}  "${c.preview}"` : head
+}
+
+// The TUI message data API is optional across host versions. Log a single hint
+// (never once per poll) when it is unavailable and hide the whole section.
+let warnedMessagesUnavailable = false
 
 function Sidebar(props: { entry: () => StateEntry | null }) {
   const context = usePlugin()
@@ -187,32 +493,360 @@ function Sidebar(props: { entry: () => StateEntry | null }) {
   )
 }
 
+// Host-owned session.panel input ({ name, sessionID, width, presentation,
+// focused, focus(), close(), toggleFullscreen() }). Typed structurally instead
+// of imported so this file stays independent of the host type package; the host
+// resolves the panel API at runtime.
+type PanelInput = {
+  readonly name: string
+  readonly sessionID: string
+  readonly width: number
+  readonly presentation: "panel" | "fullscreen"
+  readonly focused: boolean
+  readonly focus: () => void
+  readonly close: () => void
+  readonly toggleFullscreen: () => void
+}
+
+// Panel column layout (monospace), derived from the host-provided panel width
+// so cells never collide on narrow terminals. Gaps between columns keep a
+// truncated cell visually separated from its neighbour.
+const GUTTER = 2
+const CTX_WIDTH = 12
+
+function panelLayout(panelWidth: number): {
+  roleW: number
+  modelW: number
+  ctxW: number
+  updW: number
+  gutter: string
+} {
+  const w = num(panelWidth) > 0 ? num(panelWidth) : 60
+  const ctxW = CTX_WIDTH
+  const updW = Math.max(5, Math.min(8, w - ctxW - 3 * GUTTER - 24))
+  const roleW = Math.max(12, Math.min(20, Math.floor(w * 0.3)))
+  const modelW = Math.max(10, w - roleW - ctxW - updW - 3 * GUTTER)
+  return { roleW, modelW, ctxW, updW, gutter: " ".repeat(GUTTER) }
+}
+
+// Per-row denominator with the same fallback cascade as the server table:
+// usable, else limit, else none.
+function panelDenom(e: StateEntry | undefined): number {
+  const u = num(e?.usable)
+  if (u > 0) return u
+  const l = num(e?.limit)
+  return l > 0 ? l : 0
+}
+
+function panelRole(e: StateEntry, isMain: boolean): string {
+  if (isMain) return "main"
+  return e.agent ? `sub:${safeText(e.agent)}` : "sub"
+}
+
+// Full session panel: header + one row per session in the family (root plus
+// subagent descendants). It reads the same state.json bridge as the sidebar via
+// the shared 1 s tick, so both surfaces refresh on ONE poll. `panel.sessionID`
+// selects the root; `cx` opens the panel (registered from the "app" slot below).
+function BreakdownPanel(props: {
+  panel: PanelInput
+  snapshot: () => Record<string, StateEntry>
+  refresh: () => void
+}) {
+  const context = usePlugin()
+  const base = () => token(context?.theme?.text?.base, "white")
+  const muted = () => token(context?.theme?.text?.muted, base())
+
+  // Panel-local keys. The layer is owned by this component and disposed with it.
+  // mode "global" + an explicit focused check is the portable fallback when no
+  // target renderable is available: the keys act only while the panel owns input.
+  // The capability guard keeps an older host (no keymap API) from throwing.
+  const keymap = context?.keymap
+  if (keymap && typeof keymap.layer === "function") {
+    keymap.layer(() => ({
+      mode: "global",
+      priority: -1,
+      commands: [
+        {
+          id: "context-indicator.breakdown.close",
+          title: "Close the context breakdown panel",
+          bind: "escape",
+          enabled: () => props.panel.focused,
+          run: () => {
+            if (props.panel.focused) props.panel.close()
+          },
+        },
+        {
+          id: "context-indicator.breakdown.refresh",
+          title: "Refresh the context breakdown panel",
+          bind: "r",
+          enabled: () => props.panel.focused,
+          run: () => {
+            if (props.panel.focused) props.refresh()
+          },
+        },
+        {
+          id: "context-indicator.breakdown.export",
+          title: "Export a redacted breakdown snapshot",
+          bind: "e",
+          enabled: () => props.panel.focused,
+          run: () => {
+            if (props.panel.focused) exportRedacted()
+          },
+        },
+      ],
+    }))
+  }
+
+  // One snapshot read per poll tick (props.snapshot tracks the shared tick), so
+  // the memo recomputes together with the sidebar instead of polling separately.
+  const data = createMemo(() => {
+    const snap = props.snapshot()
+    return {
+      root: snap[props.panel.sessionID],
+      rows: collectFamily(snap, props.panel.sessionID),
+    }
+  })
+
+  // Live message list from the TUI data layer (in-process, no LLM call). The
+  // shared `props.snapshot()` tick is read FIRST so this re-reads every poll.
+  // `available: false` means the API is absent/errored -> the WHOLE measured
+  // section is hidden (and a one-time hint was logged).
+  const messages = createMemo<{ available: boolean; list: unknown[] }>(() => {
+    props.snapshot()
+    try {
+      const api = context?.data?.session?.message
+      if (!api || typeof api.list !== "function") {
+        if (!warnedMessagesUnavailable) {
+          warnedMessagesUnavailable = true
+          console.error(
+            "[context-indicator] TUI message data API unavailable; " +
+              "measured contributors section hidden",
+          )
+        }
+        return { available: false, list: [] }
+      }
+      const v = api.list(props.panel.sessionID)
+      return { available: true, list: Array.isArray(v) ? v : [] }
+    } catch {
+      if (!warnedMessagesUnavailable) {
+        warnedMessagesUnavailable = true
+        console.error(
+          "[context-indicator] TUI message read failed; " +
+            "measured contributors section hidden",
+        )
+      }
+      return { available: false, list: [] }
+    }
+  })
+
+  const contributors = createMemo<Contributor[]>(() => {
+    const m = messages()
+    if (!m.available) return []
+    try {
+      return measureContributors(m.list)
+    } catch {
+      return []
+    }
+  })
+
+  // Redacted export (key `e`). No message text, no full session id, no tool
+  // output content ever leaves this function. Never throws: a failure logs and
+  // shows an error toast instead.
+  function exportRedacted(): void {
+    let exportedName: string | null = null
+    try {
+      const r = data().root
+      const id8 = String(props.panel.sessionID).slice(0, 8)
+      const now = new Date()
+      const pad = (n: number) => String(n).padStart(2, "0")
+      const stamp =
+        `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
+        `-${pad(now.getHours())}${pad(now.getMinutes())}` +
+        `${pad(now.getSeconds())}${String(now.getMilliseconds()).padStart(3, "0")}`
+      const payload = {
+        generatedAt: now.toISOString(),
+        session: {
+          id: `${id8}...`,
+          model: safeText(r?.model ?? ""),
+          providerID: safeText(r?.providerID ?? ""),
+        },
+        family: data().rows.map((e, i) => {
+          const d = panelDenom(e)
+          return {
+            // Positional main-row detection (index 0), same as the render —
+            // state.json is untrusted input and a legacy entry may lack
+            // `sessionID`, which would mislabel main as sub.
+            role: panelRole(e, i === 0),
+            model: safeText(e.model ?? ""),
+            ctx: num(e.ctx),
+            usable: e.usable == null ? null : num(e.usable),
+            limit: e.limit == null ? null : num(e.limit),
+            pct: d > 0 ? Math.round((num(e.ctx) / d) * 100) : null,
+            updated: safeText(e.updatedAt ?? ""),
+          }
+        }),
+        contributors: contributors().map((c) => ({
+          kind: c.kind,
+          tool: c.tool || null,
+          ref: c.ref,
+          chars: c.chars,
+          tokensEstimate: c.tokensEstimate,
+        })),
+      }
+      const dir = join(tmpdir(), "opencode-context-indicator", "exports")
+      const file = join(dir, `context-${id8}-${stamp}.json`)
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(file, JSON.stringify(payload, null, 2), "utf8")
+      exportedName = basename(file)
+    } catch (err) {
+      console.error("[context-indicator] redacted export failed:", err)
+      try {
+        context?.ui?.toast?.show({
+          message: "redacted export failed",
+          variant: "error",
+        })
+      } catch {
+        /* toast is best-effort */
+      }
+      return
+    }
+    // Outside the write try: a toast failure must not report the export as
+    // failed when the file is already on disk.
+    try {
+      context?.ui?.toast?.show({
+        message: `exported ${exportedName}`,
+        variant: "success",
+      })
+    } catch {
+      /* toast is best-effort */
+    }
+  }
+
+  const header = (): string => {
+    const r = data().root
+    if (!r) return "Context breakdown"
+    const model = safeText(r.model && r.model !== "unknown" ? r.model : "model?")
+    const ctx = fmt(num(r.ctx))
+    const d = panelDenom(r)
+    return d > 0
+      ? `Context breakdown \u2014 ${model} ${ctx}/${fmt(d)} (${Math.round(
+          (num(r.ctx) / d) * 100,
+        )}%)`
+      : `Context breakdown \u2014 ${model} ${ctx}`
+  }
+
+  const layout = (): {
+    roleW: number
+    modelW: number
+    ctxW: number
+    updW: number
+    gutter: string
+  } => panelLayout(props.panel.width)
+
+  const columns = (): string => {
+    const L = layout()
+    return (
+      fit("role", L.roleW) +
+      L.gutter +
+      fit("model", L.modelW) +
+      L.gutter +
+      fit("ctx", L.ctxW) +
+      L.gutter +
+      "updated"
+    )
+  }
+
+  const row = (e: StateEntry, isMain: boolean): string => {
+    const model = safeText(e.model && e.model !== "unknown" ? e.model : "model?")
+    const d = panelDenom(e)
+    const ctx =
+      d > 0
+        ? `${fmt(num(e.ctx))} (${Math.round((num(e.ctx) / d) * 100)}%)`
+        : fmt(num(e.ctx))
+    const L = layout()
+    return (
+      fit(panelRole(e, isMain), L.roleW) +
+      L.gutter +
+      fit(model, L.modelW) +
+      L.gutter +
+      fit(ctx, L.ctxW) +
+      L.gutter +
+      updatedAt(e.updatedAt)
+    )
+  }
+
+  return (
+    <box flexDirection="column">
+      <text fg={base()}>{header()}</text>
+      <Show
+        when={data().root}
+        fallback={<text fg={muted()}>{"  no data yet"}</text>}
+      >
+        <text fg={muted()}>{columns()}</text>
+        {data().rows.map((e, i) => (
+          <text fg={muted()}>{row(e, i === 0)}</text>
+        ))}
+      </Show>
+      <Show when={messages().available}>
+        <text fg={base()}>{"largest contributors (measured)"}</text>
+        <Show
+          when={contributors().length > 0}
+          fallback={<text fg={muted()}>{"  no messages yet"}</text>}
+        >
+          {contributors()
+            .slice(0, 5)
+            .map((c, i) => (
+              <text fg={muted()}>{contributorLine(c, i + 1)}</text>
+            ))}
+        </Show>
+        <text fg={muted()}>
+          {
+            "measured != server categories (tool outputs counted here; server categories exclude them)"
+          }
+        </text>
+      </Show>
+    </box>
+  )
+}
+
 export default Plugin.define({
   id: "context-indicator.tui",
   setup(context) {
     // npm installs (path under node_modules) cannot get live slot updates on
     // this OpenCode version. Stay inert and log a single hint instead of
-    // registering a slot that would freeze on "no data yet".
+    // registering slots that would freeze on "no data yet".
     if (isNodeModulesInstall()) {
       console.log(
-        "[context-indicator] TUI sidebar disabled: npm-installed plugins cannot get " +
-          "live updates on this OpenCode version (anomalyco/opencode#33884). " +
-          'Install via file:// (see README → "Live sidebar") for the live sidebar. ' +
-          "Slash commands still work everywhere.",
+        "[context-indicator] TUI sidebar and breakdown panel disabled: " +
+          "npm-installed plugins cannot get live updates on this OpenCode " +
+          "version (anomalyco/opencode#33884). Install via file:// (see README " +
+          '→ "Live sidebar") for the live sidebar and panel. The /context slash ' +
+          "commands still work everywhere.",
       )
       return
     }
 
-    // Re-read the bridge file once per second and re-render reactively.
+    // Re-read the bridge file once per second and re-render reactively. ONE
+    // ticker drives BOTH surfaces, and the snapshot is cached per tick: every
+    // consumer (sidebar, panel data, messages) shares a single readFileSync.
     const [tick, setTick] = createSignal(0)
     let currentSession: string | undefined
-    const entry = (): StateEntry | null => {
-      tick() // track the ticker so reads re-run every poll
-      return readEntry(currentSession)
+    let snapCache: Record<string, StateEntry> | null = null
+    let snapAt = -1
+    const snapshot = (): Record<string, StateEntry> => {
+      const t = tick() // track the ticker so reads re-run every poll
+      if (snapCache === null || snapAt !== t) {
+        snapCache = readSnapshot()
+        snapAt = t
+      }
+      return snapCache
     }
+    const entry = (): StateEntry | null =>
+      snapshot()[currentSession ?? ""] ?? null
+    const refresh = () => setTick((n) => n + 1)
     const timer = setInterval(() => setTick((n) => n + 1), POLL_MS)
 
-    const unregister = context.ui.slot({
+    const unregisterSidebar = context.ui.slot({
       append: "sidebar.content",
       render: ({ sessionID }) => {
         currentSession = sessionID
@@ -220,12 +854,59 @@ export default Plugin.define({
       },
     })
 
+    // A `session.panel` contribution is independently selectable: it renders
+    // only while its name is the selected one, and the root session comes from
+    // panel.sessionID.
+    const unregisterPanel = context.ui.slot({
+      append: "session.panel",
+      render: (panel) => (
+        <Show when={panel.name === PANEL_NAME}>
+          <BreakdownPanel panel={panel} snapshot={snapshot} refresh={refresh} />
+        </Show>
+      ),
+    })
+
+    // The `app` slot renders nothing itself; it exists to register the global
+    // keymap layer (slash command `cx` -> open the panel). The layer is owned by
+    // this slot and disposed when the slot unregisters.
+    const unregisterCommands = context.ui.slot({
+      append: "app",
+      render: () => {
+        const keymap = context?.keymap
+        if (keymap && typeof keymap.layer === "function") {
+          keymap.layer(() => ({
+            mode: "global",
+            commands: [
+              {
+                id: "context-indicator.breakdown",
+                title: "Context breakdown panel",
+                slash: { name: "cx" },
+                run: () => {
+                  const panelApi = context?.ui?.panel
+                  if (panelApi && typeof panelApi.open === "function") {
+                    panelApi.open(PANEL_NAME)
+                  }
+                },
+              },
+            ],
+          }))
+        }
+        return null
+      },
+    })
+
     return () => {
       clearInterval(timer)
-      try {
-        unregister?.()
-      } catch {
-        /* ignore */
+      for (const unregister of [
+        unregisterSidebar,
+        unregisterPanel,
+        unregisterCommands,
+      ]) {
+        try {
+          unregister?.()
+        } catch {
+          /* ignore */
+        }
       }
     }
   },
