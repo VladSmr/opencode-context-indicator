@@ -21,6 +21,16 @@ const checks = [
   ["@opentui/core", true],  // optional peer — resolves with our devDeps
 ];
 
+// Local relative imports from tui.tsx resolve through the ordinary node
+// mechanism (the host only bridges host modules), so verify them with a
+// require rooted AT tui.tsx — the same base directory the TUI loader uses.
+// (createRequire from @opencode/plugin/tui cannot resolve repo-relative paths,
+// which is why these need their own resolver.)
+const localChecks = [["./lib/contributors.js", true]];
+const tuiRequire = createRequire(
+  pathToFileURL(path.join(__dirname, "..", "tui.tsx")).href,
+);
+
 let failed = 0;
 for (const [pkg, mustResolve] of checks) {
   try {
@@ -33,6 +43,20 @@ for (const [pkg, mustResolve] of checks) {
       failed++;
     } else {
       console.log("EXPECTED_FAIL " + pkg + ": " + e.code);
+    }
+  }
+}
+for (const [spec, mustResolve] of localChecks) {
+  try {
+    const r = tuiRequire.resolve(spec);
+    if (mustResolve) console.log("OK " + spec + " -> " + r);
+    else console.log("UNEXPECTED_OK " + spec + " -> " + r);
+  } catch (e) {
+    if (mustResolve) {
+      console.error("FAILED " + spec + ": " + e.code);
+      failed++;
+    } else {
+      console.log("EXPECTED_FAIL " + spec + ": " + e.code);
     }
   }
 }

@@ -27,7 +27,7 @@
  *
  * Runtime requirements: @opentui/core and solid-js are optional peers resolved
  * by OpenCode at runtime. @opentui/solid is a pinned direct dependency (exact
- * 0.5.14): OpenCode's TUI loader does not expose a host instance of it, so for
+ * 0.5.16): OpenCode's TUI loader does not expose a host instance of it, so for
  * npm-installed plugins the JSX pragma would otherwise fail to resolve
  * `@opentui/solid/jsx-runtime` (upstream opencode issue #33884).
  *
@@ -47,6 +47,23 @@ import {mkdirSync, readFileSync, writeFileSync} from "node:fs"
 import {tmpdir} from "node:os"
 import {basename, join} from "node:path"
 import {fileURLToPath} from "node:url"
+type Contributor = {
+  kind: string
+  ref: string
+  chars: number
+  tokensEstimate: number
+  tool: string
+  preview: string
+}
+import {
+  safeText,
+  measureContributors,
+  contributorLine,
+  exportFileName,
+  buildRedactedPayload,
+  panelDenom,
+  panelRole,
+} from "./lib/contributors.js"
 
 const STATE_FILE =
   process.env.OPENCODE_CONTEXT_INDICATOR_STATE_FILE ||
@@ -92,6 +109,7 @@ type StateEntry = {
   ctx?: number
   input?: number
   usable?: number | null
+  reserve?: number | null
   limit?: number | null
   reasoning?: number
   categories?: Categories
@@ -202,24 +220,6 @@ function collectFamily(
   return out
 }
 
-// One-line sanitisation for untrusted labels (agent / model) rendered in the
-// panel: drop zero-width + bidi control chars, collapse C0/C1 controls (incl.
-// CR/LF/TAB) and the line/paragraph separators to spaces, then cap the result at
-// 32 code points (code-point safe). Only labels are ever rendered — never
-// message content.
-function safeText(v: unknown): string {
-  try {
-    const s = v == null ? "" : String(v)
-    const cleaned = s
-      .replace(/[\u200B-\u200F\u202A-\u202E\u2066-\u2069]/g, "")
-      .replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]/g, " ")
-    const cps = Array.from(cleaned)
-    return cps.length > 32 ? `${cps.slice(0, 31).join("")}~` : cleaned
-  } catch {
-    return ""
-  }
-}
-
 function updatedAt(iso: string | undefined): string {
   if (!iso) return "?"
   try {
@@ -249,188 +249,6 @@ function fit(s: string, w: number): string {
 // RESULT outputs are counted here — the server's state.json categories never
 // see them — which is what makes the residual `other` explicable.
 // ---------------------------------------------------------------------------
-
-type Contributor = {
-  kind: string
-  ref: string
-  chars: number
-  tokensEstimate: number
-  // Tool name for the tool-args / tool-result buckets (e.g. "bash"), else "".
-  tool: string
-  // First characters of THIS bucket's text, control chars stripped. Rendered
-  // on the user's own screen only — exportRedacted() never includes it.
-  preview: string
-}
-
-// Local copy of the token-estimate core (estimateTokens in lib/estimate.js).
-// tui.tsx is loaded standalone and must NOT import lib/*, so the ~20-line
-// three-density unicode heuristic is duplicated on purpose: Cyrillic ~2.5,
-// CJK ~1.5, latin/ASCII ~4 chars/token. Heuristic, not a tokenizer.
-function estimateTokensLocal(s: string): number {
-  let other = 0
-  let cyr = 0
-  let cjk = 0
-  for (let i = 0; i < s.length; i++) {
-    const cp = s.codePointAt(i) as number
-    if (cp > 0xffff) i++ // astral pair: consume the low surrogate
-    if (cp < 0x80) other++
-    else if (
-      (cp >= 0x0400 && cp <= 0x04ff) || // Cyrillic
-      (cp >= 0x0500 && cp <= 0x052f) || // Cyrillic Supplement
-      (cp >= 0x2de0 && cp <= 0x2dff) || // Cyrillic Extended-A
-      (cp >= 0xa640 && cp <= 0xa69f) || // Cyrillic Extended-B
-      (cp >= 0x1c80 && cp <= 0x1c8f) // Cyrillic Extended-C
-    )
-      cyr++
-    else if (
-      (cp >= 0x4e00 && cp <= 0x9fff) || // CJK Unified Ideographs
-      (cp >= 0x3400 && cp <= 0x4dbf) || // CJK Extension A
-      (cp >= 0xf900 && cp <= 0xfaff) || // CJK Compatibility Ideographs
-      (cp >= 0x3040 && cp <= 0x30ff) || // Hiragana + Katakana
-      (cp >= 0xac00 && cp <= 0xd7af) || // Hangul Syllables
-      (cp >= 0x3000 && cp <= 0x303f) || // CJK Symbols and Punctuation
-      (cp >= 0xff00 && cp <= 0xffef) // Halfwidth/Fullwidth Forms
-    )
-      cjk++
-    else other++
-  }
-  return Math.round(other / 4 + cyr / 2.5 + cjk / 1.5)
-}
-
-// Live message data is untrusted: coerce every field defensively, never throw.
-function asRecord(v: unknown): Record<string, unknown> | null {
-  return v && typeof v === "object" ? (v as Record<string, unknown>) : null
-}
-
-// Char counts per (message, bucket). `asst.text` = assistant text,
-// `asst.rsn` = reasoning, `asst.tool` = tool CALL arguments (streaming raw
-// string or JSON.stringify of the input object), `asst.result` = tool RESULT
-// outputs (text content of completed/error tool states). Sorted descending by
-// estimated tokens.
-function measureContributors(messages: readonly unknown[]): Contributor[] {
-  const out: Contributor[] = []
-  // Single-line, bounded preview of the bucket text: control chars (incl.
-  // CR/LF/TAB and line separators) collapse to spaces, bidi/zero-width stripped,
-  // capped at 26 code points with a "~" tail. Local rendering only. An explicit
-  // override (e.g. "" for raw tool-args JSON) suppresses the preview.
-  const previewOf = (sample: string): string => {
-    const cleaned = sample
-      .replace(/[\u200B-\u200F\u202A-\u202E\u2066-\u2069]/g, "")
-      .replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]+/g, " ")
-      .trim()
-    const cps = Array.from(cleaned)
-    return cps.length > 26 ? `${cps.slice(0, 25).join("")}~` : cleaned
-  }
-  const add = (
-    kind: string,
-    ref: string,
-    sample: string,
-    tool = "",
-    previewOverride?: string,
-  ) => {
-    if (sample.length === 0) return
-    out.push({
-      kind,
-      ref,
-      chars: sample.length,
-      tokensEstimate: estimateTokensLocal(sample),
-      tool,
-      preview: previewOverride ?? previewOf(sample),
-    })
-  }
-  // Human clock ref: "21:04" from the message's own creation time — far more
-  // actionable than an array ordinal. Falls back to "#N" when time is absent.
-  const hhmm = (ms: unknown): string => {
-    if (typeof ms !== "number" || !Number.isFinite(ms) || ms <= 0) return ""
-    try {
-      const d = new Date(ms)
-      if (Number.isNaN(d.getTime())) return ""
-      const pad = (x: number) => String(x).padStart(2, "0")
-      return `${pad(d.getHours())}:${pad(d.getMinutes())}`
-    } catch {
-      return ""
-    }
-  }
-  for (let i = 0; i < messages.length; i++) {
-    const m = asRecord(messages[i])
-    if (!m) continue
-    const timeRec = asRecord(m.time)
-    const ref = hhmm(timeRec?.created) || `#${i + 1}`
-    const type = typeof m.type === "string" ? m.type : ""
-    if (type === "user") {
-      if (typeof m.text === "string") add("user.text", ref, m.text)
-      continue
-    }
-    if (type !== "assistant") continue
-    const content = Array.isArray(m.content) ? m.content : []
-    let text = ""
-    let rsn = ""
-    for (const rawPart of content) {
-      const part = asRecord(rawPart)
-      if (!part) continue
-      const pt = typeof part.type === "string" ? part.type : ""
-      if (pt === "text") {
-        if (typeof part.text === "string") text += part.text
-      } else if (pt === "reasoning") {
-        if (typeof part.text === "string") rsn += part.text
-      } else if (pt === "tool") {
-        const state = asRecord(part.state)
-        if (!state) continue
-        // Per-tool-part contributors: each tool call carries its own name and
-        // measured size (one message can hold several tool calls). The raw
-        // args JSON is measured but NOT previewed — the tool name is the
-        // useful identifier; result text previews fine.
-        const toolName =
-          typeof part.name === "string" && part.name ? safeText(part.name) : ""
-        let tool = ""
-        let result = ""
-        if (typeof state.input === "string") {
-          tool += state.input
-        } else if (state.input != null) {
-          try {
-            tool += JSON.stringify(state.input) ?? ""
-          } catch {
-            /* unstringifiable input: skip its chars */
-          }
-        }
-        const c = state.content
-        if (Array.isArray(c)) {
-          for (const rawItem of c) {
-            const item = asRecord(rawItem)
-            if (item && item.type === "text" && typeof item.text === "string")
-              result += item.text
-          }
-        }
-        add("asst.tool", ref, tool, toolName, "") // raw args JSON: no preview
-        add("asst.result", ref, result, toolName)
-      }
-    }
-    add("asst.text", ref, text)
-    add("asst.rsn", ref, rsn)
-  }
-  return out.sort((a, b) => b.tokensEstimate - a.tokensEstimate)
-}
-
-// Human line for one measured contributor: role in full words, the message's
-// own clock time, the bucket (with the tool name for tool buckets), the token
-// estimate, and a bounded single-line preview of THIS bucket only. Never
-// contains a full session id or file paths.
-function contributorLine(c: Contributor, rank: number): string {
-  const [who, bucket] = c.kind.split(".")
-  const role = who === "asst" ? "assistant" : who
-  const what =
-    bucket === "rsn"
-      ? "reasoning"
-      : bucket === "tool"
-        ? "tool args"
-        : bucket === "result"
-          ? "tool result"
-          : ""
-  const tool = c.tool ? ` (${c.tool})` : ""
-  const whatFull = what ? `${what}${tool}` : ""
-  const head = `${rank}. ${role} ${c.ref}${whatFull ? ` ${whatFull}` : ""} \u2014 ${fmt(c.tokensEstimate)}`
-  return c.preview ? `${head}  "${c.preview}"` : head
-}
 
 // The TUI message data API is optional across host versions. Log a single hint
 // (never once per poll) when it is unavailable and hide the whole section.
@@ -527,20 +345,6 @@ function panelLayout(panelWidth: number): {
   const roleW = Math.max(12, Math.min(20, Math.floor(w * 0.3)))
   const modelW = Math.max(10, w - roleW - ctxW - updW - 3 * GUTTER)
   return { roleW, modelW, ctxW, updW, gutter: " ".repeat(GUTTER) }
-}
-
-// Per-row denominator with the same fallback cascade as the server table:
-// usable, else limit, else none.
-function panelDenom(e: StateEntry | undefined): number {
-  const u = num(e?.usable)
-  if (u > 0) return u
-  const l = num(e?.limit)
-  return l > 0 ? l : 0
-}
-
-function panelRole(e: StateEntry, isMain: boolean): string {
-  if (isMain) return "main"
-  return e.agent ? `sub:${safeText(e.agent)}` : "sub"
 }
 
 // Full session panel: header + one row per session in the family (root plus
@@ -655,46 +459,20 @@ function BreakdownPanel(props: {
   function exportRedacted(): void {
     let exportedName: string | null = null
     try {
-      const r = data().root
-      const id8 = String(props.panel.sessionID).slice(0, 8)
       const now = new Date()
-      const pad = (n: number) => String(n).padStart(2, "0")
-      const stamp =
-        `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
-        `-${pad(now.getHours())}${pad(now.getMinutes())}` +
-        `${pad(now.getSeconds())}${String(now.getMilliseconds()).padStart(3, "0")}`
-      const payload = {
-        generatedAt: now.toISOString(),
-        session: {
-          id: `${id8}...`,
-          model: safeText(r?.model ?? ""),
-          providerID: safeText(r?.providerID ?? ""),
-        },
-        family: data().rows.map((e, i) => {
-          const d = panelDenom(e)
-          return {
-            // Positional main-row detection (index 0), same as the render —
-            // state.json is untrusted input and a legacy entry may lack
-            // `sessionID`, which would mislabel main as sub.
-            role: panelRole(e, i === 0),
-            model: safeText(e.model ?? ""),
-            ctx: num(e.ctx),
-            usable: e.usable == null ? null : num(e.usable),
-            limit: e.limit == null ? null : num(e.limit),
-            pct: d > 0 ? Math.round((num(e.ctx) / d) * 100) : null,
-            updated: safeText(e.updatedAt ?? ""),
-          }
-        }),
-        contributors: contributors().map((c) => ({
-          kind: c.kind,
-          tool: c.tool || null,
-          ref: c.ref,
-          chars: c.chars,
-          tokensEstimate: c.tokensEstimate,
-        })),
-      }
+      const name = exportFileName(props.panel.sessionID, now)
+      const payload = buildRedactedPayload({
+        sessionID: props.panel.sessionID,
+        root: data().root,
+        rows: data().rows,
+        contributors: contributors(),
+        now,
+        panelDenom,
+        panelRole,
+        num,
+      })
       const dir = join(tmpdir(), "opencode-context-indicator", "exports")
-      const file = join(dir, `context-${id8}-${stamp}.json`)
+      const file = join(dir, name)
       mkdirSync(dir, { recursive: true })
       writeFileSync(file, JSON.stringify(payload, null, 2), "utf8")
       exportedName = basename(file)
@@ -786,24 +564,37 @@ function BreakdownPanel(props: {
         {data().rows.map((e, i) => (
           <text fg={muted()}>{row(e, i === 0)}</text>
         ))}
-      </Show>
-      <Show when={messages().available}>
-        <text fg={base()}>{"largest contributors (measured)"}</text>
         <Show
-          when={contributors().length > 0}
-          fallback={<text fg={muted()}>{"  no messages yet"}</text>}
-        >
-          {contributors()
-            .slice(0, 5)
-            .map((c, i) => (
-              <text fg={muted()}>{contributorLine(c, i + 1)}</text>
-            ))}
-        </Show>
-        <text fg={muted()}>
-          {
-            "measured != server categories (tool outputs counted here; server categories exclude them)"
+          when={
+            (data().root?.usable ?? 0) > 0
           }
-        </text>
+        >
+          <text fg={muted()}>
+            {"  compact at " +
+              fmt(num(data().root?.usable)) +
+              (num(data().root?.reserve) > 0
+                ? " (" + fmt(num(data().root?.reserve)) + " reserve)"
+                : "")}
+          </text>
+        </Show>
+        <Show when={messages().available}>
+          <text fg={base()}>{"largest contributors (measured)"}</text>
+          <Show
+            when={contributors().length > 0}
+            fallback={<text fg={muted()}>{"  no messages yet"}</text>}
+          >
+            {contributors()
+              .slice(0, 5)
+              .map((c, i) => (
+                <text fg={muted()}>{contributorLine(c, i + 1)}</text>
+              ))}
+          </Show>
+          <text fg={muted()}>
+            {
+              "measured != server categories (tool outputs counted here; server categories exclude them)"
+            }
+          </text>
+        </Show>
       </Show>
     </box>
   )

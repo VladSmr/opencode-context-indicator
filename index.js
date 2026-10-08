@@ -112,8 +112,8 @@
  *   Every live/final log write ALSO rewrites
  *     %TEMP%\opencode-context-indicator-state.json   (os.tmpdir())
  *   — a machine-readable { sessionID: { model, providerID, ctx, usable,
- *     limit, categories{...}, updatedAt } } snapshot consumed by the optional
- *   TUI sidebar in ./tui.tsx (package entry "./tui"). Written atomically
+ *     reserve, limit, categories{...}, updatedAt } } snapshot consumed by the
+ *   optional TUI sidebar in ./tui.tsx (package entry "./tui"). Written atomically
  *   (temp + rename), keyed by session, bounded to MAX_TRACKED_SESSIONS, and
  *   strictly additive: any failure is swallowed and never affects the log.
  *
@@ -123,9 +123,10 @@
  *
  *   - Metric: the native opencode overflow count — tokens.total when present,
  *     else input + output + cache.read + cache.write — compared against the
- *     model's usable window (limit.input − reserved, else limit.context −
- *     maxOutput). Percentages are NOT clamped at 100% — exceeding the window
- *     must stay visible.
+ *     model's compaction ceiling (opencode v2.0.23 calculateCeiling): window =
+  *     limit.input || limit.context, reserve = max(10% of window, 16k when
+  *     window >= 32k), usable = window - reserve. Percentages are NOT
+  *     clamped at 100% - exceeding the ceiling must stay visible.
  *   - Category estimates use a unicode-aware heuristic (see estimateTokens):
  *     Cyrillic ~2.5 chars/token, CJK ~1.5, latin/ASCII ~4. These are ESTIMATES,
  *     not a tokenizer; "other" is the residual input − sum of estimates.
@@ -165,6 +166,7 @@ import {
   getUsableContext,
   hydrateModelLimitsFromState,
   modelLimits,
+  reserveFor,
 } from "./lib/limits.js";
 import { sessionAgentCache, sessionParentCache } from "./lib/cache.js";
 import {
@@ -189,6 +191,7 @@ export {
   hydrateModelLimitsFromState,
   getUsableContext,
   getModelLimit,
+  reserveFor,
   collectSessionReport,
   renderSessionRow,
   shortSummaryText,

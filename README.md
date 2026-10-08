@@ -10,7 +10,7 @@ arguments and the residual "other" bucket.
 The package ships a **dual V1 + V2 plugin** (one entry works in both OpenCode
 generations) plus an optional TUI module (`./tui` entry) that renders a **live
 sidebar** and a **zero-LLM `/cx` breakdown panel** with measured contributors
-and a redacted export. The V2 path is **tested against opencode v2.0.22**; the
+and a redacted export. The V2 path is **tested against opencode v2.0.25**; the
 V1 path against 1.18.29+.
 
 > **V1 is feature-frozen.** It is kept working for compatibility (bug fixes
@@ -50,6 +50,14 @@ For every served request the plugin estimates how the context window is split:
 * `ctx` is OpenCode's native overflow count: `tokens.total` when present, else
   `input + output + cache.read + cache.write`. Percentages are **not clamped**
   at 100% — exceeding the window stays visible.
+* The denominator is the **opencode v2.0.23 compaction ceiling**: `window =
+  limit.input || limit.context`; `reserve = max(floor(window * 0.1), window >=
+  32_000 ? 16_000 : 0)`; the ceiling is `window - reserve`. When opencode
+  carries a `compaction.buffer` configured in its own settings, the plugin
+  cannot read that value (it is not exposed to plugins), so the default
+  reserve formula is used — set `OPENCODE_CONTEXT_INDICATOR_COMPACT_BUFFER`
+  to override the reserve for testing or custom setups (positive integer <=
+  1e9; invalid values are silently ignored).
 
 ### Toast (V1 only)
 
@@ -296,7 +304,7 @@ and `$TMPDIR` (usually `/tmp`) elsewhere:
 | File | Purpose |
 | --- | --- |
 | `context-breakdown.log` | Human-readable live snapshot + bounded final summaries |
-| `opencode-context-indicator-state.json` | Machine-readable snapshot consumed by the TUI sidebar and the `/cx` panel |
+| `opencode-context-indicator-state.json` | Machine-readable snapshot consumed by the TUI sidebar and the `/cx` panel. Fields per entry: `sessionID`, `parentID`, `role`, `agent`, `model`, `providerID`, `ctx`, `input`, `usable` (compaction ceiling), `reserve` (tokens reserved for compaction), `limit` (context window), `reasoning`, `categories{user,assistant,reasoning,toolArgs,system,toolSchemas,other}`, `updatedAt`. |
 | `context-events.log` | Raw event tap — **only** when `DEBUG_EVENTS` is flipped to `true` in the source (off by default) |
 
 The live `context-breakdown.log` snapshot is **rewritten** (never grows); final
@@ -429,13 +437,13 @@ the sidebar instead.
   gracefully (the breakdown falls back to throttled `session.messages` fetches
   and toasts keep working).
 * **OpenCode ≥ 2.0.16** for the V2 path (built and verified against
-  **2.0.22**).
+  **2.0.25**).
 * **TUI sidebar**: terminal TUI only, requires the OpenTUI rendering stack that
   ships with OpenCode. `@opentui/core` and `solid-js` are **optional** peer
   dependencies resolved by OpenCode at runtime; the main plugin installs and runs
   fine without them (the sidebar simply is not available). `@opentui/solid` is
-  instead shipped as a **pinned direct dependency** (exact `0.5.14`, matching
-  the OpenTUI stack OpenCode 2.0.22 ships): OpenCode's
+  instead shipped as a **pinned direct dependency** (exact `0.5.16`, matching
+  the OpenTUI stack OpenCode 2.0.25 ships): OpenCode's
   TUI loader does not expose a host instance of it, so for npm-installed plugins
   the JSX pragma would otherwise fail to resolve `@opentui/solid/jsx-runtime`
   (upstream: opencode issue #33884 — `node_modules` plugins are excluded from the
