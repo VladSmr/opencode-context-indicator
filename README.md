@@ -56,7 +56,7 @@ For every served request the plugin estimates how the context window is split:
   carries a `compaction.buffer` configured in its own settings, the plugin
   cannot read that value (it is not exposed to plugins), so the default
   reserve formula is used — set `OPENCODE_CONTEXT_INDICATOR_COMPACT_BUFFER`
-  to override the reserve for testing or custom setups (positive integer <=
+  to override the reserve for testing or custom setups (non-negative integer <=
   1e9; invalid values are silently ignored).
 
 ### Toast (V1 only)
@@ -505,9 +505,10 @@ caller.
 ### Running tests
 
 ```bash
-npm run test:prepublish       # fast gate: tarball + tui.tsx + resolve + T1–T12 unit
+npm run test:prepublish       # fast gate: tarball + tui.tsx + resolve + T1–T16i unit checks
 npm run test:e2e              # full E2E: isolated plugin load + one "Say OK" round-trip
 npm run test:e2e:quick        # E2E load-only, no LLM call
+npm run test:drift            # OpenTUI pin vs the latest RELEASED opencode (also in CI)
 ```
 
 `prepublishOnly` runs **both** gates automatically on `npm publish`
@@ -524,8 +525,8 @@ STEP 80 s, ~3 min total.
 |---|---|---|
 | (a) tarball composition | `package.json` `files[]` expands to the base files plus every `lib/*` module (count asserted dynamically) | no test/node_modules/tsconfig in the tarball |
 | (b) pragma regression | esbuild `--jsx=automatic` → `@opentui/solid/jsx-runtime` present, `react/jsx-runtime` absent | a removed/broken pragma kills the sidebar on npm install |
-| (c) resolve chain | replica install → `import.meta.resolve` for all tui.tsx imports | broken peer/optional dep silently breaks the sidebar |
-| (d) unit harness T1–T12 | all limit/agent/state fix assertions | regressions in modelLimits, writeStateFile, hydrate |
+| (c) resolve chain | replica install: host-bridged + peer packages resolve; local tui.tsx relative imports resolve via node from the entry (resolve-bridge.cjs) | broken peer/optional dep or a bad local import silently breaks the sidebar |
+| (d) unit harness T1–T16i | limit/agent/state fix assertions plus measureContributors and redacted-export checks (34 total) | regressions in modelLimits, writeStateFile, hydrate, contributors, export |
 | (e) corporate-identifier scan | no forbidden identifiers in the published surface + test tree | compliance |
 | (f) non-English scan | no non-ASCII letters (`\p{L}` above U+007F) in any repo file | English-only source rule |
 
@@ -533,7 +534,7 @@ STEP 80 s, ~3 min total.
 
 | Check | What | Why |
 |---|---|---|
-| A — plugin load | spins a private `opencode --standalone` PTY, asserts `msg="loading plugin" → opencode-context-indicator` and that the `file:///` entrypoint is **this checkout** | catches a plugin that no longer imports cleanly, or a config pointing at the published npm copy |
+| A — plugin load | spins a private `opencode --standalone` PTY against an **isolated global config** (`OPENCODE_CONFIG_DIR` → `%TEMP%/oci-e2e-config`, sole plugin entry = this checkout's `file://` URL), then asserts **from the host opencode log** (atomic lines, immune to PTY interleaving) that the plugin loaded and its `entrypoint` is **this checkout's `index.js`** — both fail-closed | catches a plugin that no longer imports cleanly, or an isolated config the host did not honor |
 | B — live update | one `opencode run "Say OK" --standalone` round-trip; asserts the LLM answered **and** the isolated `state.json` gained a session with `ctx > 0` | catches a regression in the `session.idle` → `writeStateFile` path |
 
 The E2E is fully **non-invasive** to your running OpenCode Desktop:
@@ -542,7 +543,14 @@ The E2E is fully **non-invasive** to your running OpenCode Desktop:
 - `OPENCODE_DB` points at a throwaway DB in `%TEMP%` (your sessions are untouched);
 - `OPENCODE_CONTEXT_INDICATOR_STATE_FILE` points at a throwaway state file in `%TEMP%`
   — the live `opencode-context-indicator-state.json` is never read or written;
+- `OPENCODE_CONFIG_DIR` points at a throwaway global config written by the script
+  (plugins: this checkout; `update: "disable"`) **for Check A only** — the load
+  source is deterministic and fail-closed instead of following your live config;
+  Check B uses your real global config read-only (the round-trip needs the
+  provider/model defined there). Your real config is never modified;
 - `OPENCODE_DISABLE_PROJECT_CONFIG=1` avoids project-level config;
+- any `opencode-cli` instance the test itself spawned is force-killed after each
+  check (`serve --service` — your Desktop background service — is never touched);
 - exactly **one** minimal LLM call (`Say OK`) is made, in the isolated session.
 
 The script prints `[e2e] running against ISOLATED opencode instance — your running
@@ -555,10 +563,20 @@ model.
 
 ### CI
 
-`.github/workflows/ci.yml` runs `test/prepublish.mjs` on every push/PR and additionally
-does a standalone esbuild transpile check (pragmas, no React). The Node-pty E2E is not
-run in CI (requires the OpenCode Desktop binary) and is skipped gracefully when the CLI
-is absent (`[SKIP] opencode CLI not found`).
+`.github/workflows/ci.yml` runs on every push/PR to `main`, on `workflow_dispatch`,
+and on a daily schedule (GitHub auto-parks scheduled workflows after 60 days of
+repo inactivity — a push or manual run re-enables them):
+
+1. `npx --no-install tsc --noEmit` — typecheck of the TUI entry (`tui.tsx` + its
+   `lib/*` imports);
+2. `test/prepublish.mjs` — the full fast gate (a)–(f), including the standalone
+   esbuild transpile check (pragmas, no React);
+3. `test/drift-watch.mjs` — the OpenTUI pin must match the OpenTUI catalog of the
+   **latest released** opencode; red CI means "bump the pin before the next
+   release".
+
+The Node-pty E2E is not run in CI (requires the OpenCode binary) and is skipped
+gracefully when the CLI is absent (`[SKIP] opencode CLI not found`).
 
 ---
 

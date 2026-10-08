@@ -19,8 +19,13 @@
  *   • OPENCODE_DISABLE_PROJECT_CONFIG=1
  *                           the test does not read a project-level config.
  *   • Exactly ONE minimal LLM call ("Say OK") is made, in the isolated session.
- *   • The plugin itself is loaded from the owner's global config (currently
- *     file:/// → this repo).  That config is READ but never modified.
+ *   • Plugin source per check:
+ *       Check A — an ISOLATED global config written to %TEMP%/oci-e2e-config
+ *         (env OPENCODE_CONFIG_DIR) whose only plugin entry is this checkout's
+ *         file:// URL → deterministic, fail-closed, independent of the owner's
+ *         real config (which is never read or modified).
+ *       Check B — the owner's real global config (read-only): the round-trip
+ *         needs the configured provider/model, which may be defined there.
  *
  * Environment overrides:
  *   OPENCODE_CLI        path to opencode-cli.exe (default: Programs\@opencode-aidesktop)
@@ -33,11 +38,22 @@
  */
 
 import pty from "node-pty";
-import { readFileSync, statSync, unlinkSync, accessSync } from "node:fs";
+import {
+  readFileSync,
+  statSync,
+  unlinkSync,
+  accessSync,
+  mkdirSync,
+  writeFileSync,
+  rmSync,
+  openSync,
+  readSync,
+  closeSync,
+} from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir, homedir } from "node:os";
 import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot  = join(__dirname, "..");
@@ -73,23 +89,90 @@ for (const cand of CLI_CANDIDATES) {
 const ISOLATED_DB    = join(tmpdir(), "oci-e2e.db");
 const ISOLATED_STATE = join(tmpdir(), "oci-e2e-state.json");
 const LIVE_STATE     = join(tmpdir(), "opencode-context-indicator-state.json");
+// Isolated global config directory (see header): the ONLY plugin entry is this
+// checkout's file:// URL, so Check A's "repo entrypoint" assertion cannot be
+// flipped by the owner's real config pointing at the npm package. Used for
+// Check A ONLY — Check B needs the owner's provider/model definitions.
+const ISOLATED_CONFIG_DIR = join(tmpdir(), "oci-e2e-config");
+// Private XDG roots (Check A only): the data root holds the authoritative log
+// file, so Check A's assertions can never be contaminated by the live
+// Desktop's log streams (see the PLUGIN_LOAD_RE block below).
+const ISOLATED_DATA       = join(tmpdir(), "oci-e2e-xdg-data");
+const ISOLATED_CACHE      = join(tmpdir(), "oci-e2e-xdg-cache");
+const ISOLATED_STATE_ROOT = join(tmpdir(), "oci-e2e-xdg-state");
+const ISOLATED_LOG        = join(ISOLATED_DATA, "opencode", "log", "opencode.log");
 
-function childEnv() {
-  return {
+function writeIsolatedConfig() {
+  const entrypoint = pathToFileURL(repoRoot).href;
+  // `update: "disable"` keeps the test instance from even checking for host
+  // updates (no banners, no surprise installs inside the PTY).
+  const config = { plugins: [entrypoint], update: "disable" };
+  mkdirSync(ISOLATED_CONFIG_DIR, { recursive: true });
+  writeFileSync(join(ISOLATED_CONFIG_DIR, "opencode.json"), JSON.stringify(config, null, 2), "utf8");
+  // Clean slate for the private log tree (XDG_DATA_HOME, Check A only): the
+  // assertions must only ever see THIS run's lines.
+  rmSync(ISOLATED_DATA, { recursive: true, force: true });
+}
+writeIsolatedConfig();
+
+function childEnv(configDir) {
+  const env = {
     ...process.env,
     OPENCODE_DB: ISOLATED_DB,
     OPENCODE_CONTEXT_INDICATOR_STATE_FILE: ISOLATED_STATE,
     OPENCODE_DISABLE_PROJECT_CONFIG: "1",
   };
+  // Check A only: isolated config + fully private XDG roots (the data root
+  // holds the authoritative log file). Check B keeps the owner's real
+  // environment — provider/model definitions and auth live there.
+  if (configDir) {
+    env.OPENCODE_CONFIG_DIR = configDir;
+    env.XDG_DATA_HOME = ISOLATED_DATA;
+    env.XDG_CACHE_HOME = ISOLATED_CACHE;
+    env.XDG_STATE_HOME = ISOLATED_STATE_ROOT;
+  }
+  return env;
 }
 
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
 const PLUGIN_LOAD_RE = /msg="loading plugin"[\s\S]{0,300}?opencode-context-indicator/i;
-// Full entrypoint marker: file:/// ... /opencode-context-indicator/... (\s-tolerant
-// because conpty may wrap the long log line mid-path).
-const REPO_ENTRY_RE  = /entrypoint=file:[\s\S]{0,200}?opencode-context-indicator/i;
+// Authoritative Check A assertions come from the ISOLATED instance's OWN log
+// file (ISOLATED_LOG, declared above): the data root is redirected via
+// XDG_DATA_HOME, so that log holds ONLY lines from this test run — no
+// interleaving with the live Desktop's log streams, and no false positives
+// when the owner's own config points at this checkout. (PTY scraping alone is
+// unreliable on 2.0.25+: async multi-stream logs interleave and conpty
+// wrapping shreds regex windows.)
+
+// The exact entrypoint URL of THIS checkout's server entry — the npm cache
+// copy would ALSO contain "opencode-context-indicator" in its path, so the
+// assertion must pin the full checkout URL, not just the package name.
+const CHECKOUT_ENTRYPOINT = pathToFileURL(join(repoRoot, "index.js")).href;
+
+const logHasCheckoutEntrypoint = () => newLogSlice().includes(`entrypoint=${CHECKOUT_ENTRYPOINT}`);
+
+// The private log starts empty every run (the data tree is wiped before the
+// spawn), so the slice is simply the whole file. readSync's bytesRead is
+// honored (a torn tail cannot fake a match, and rotation/shrink cannot go
+// negative: a missing or emptied file just yields "").
+function newLogSlice() {
+  try {
+    const size = statSync(ISOLATED_LOG).size;
+    if (size === 0) return "";
+    const fh = openSync(ISOLATED_LOG, "r");
+    try {
+      const buf = Buffer.alloc(size);
+      const bytesRead = readSync(fh, buf, 0, buf.length, 0);
+      return buf.subarray(0, bytesRead).toString("utf8");
+    } finally {
+      closeSync(fh);
+    }
+  } catch {
+    return "";
+  }
+}
 
 function stripAnsi(s) {
   return s
@@ -137,11 +220,12 @@ function shQuoteArg(arg) {
   return `'${s.replace(/'/g, "'\\''")}'`;
 }
 
-function runPty(extraArgs, timeoutMs, isDone, graceMs = 0) {
+function runPty(extraArgs, timeoutMs, isDone, graceMs = 0, configDir) {
   return new Promise((resolve) => {
     let buf = "";
     let done = false;
     let graceTimer = null;
+    const cliBefore = new Set(opencodeCliCandidates().map((x) => x.pid));
 
     const cliCmd = process.platform === "win32"
       ? `& ${psQuoteArg(resolvedCliPath)} ${extraArgs.map(psQuoteArg).join(" ")}`
@@ -156,7 +240,7 @@ function runPty(extraArgs, timeoutMs, isDone, graceMs = 0) {
       cols: 200,
       rows: 50,
       cwd: tmpdir(),
-      env: childEnv(),
+      env: childEnv(configDir),
     });
 
     const finish = (exitCode, timedOut) => {
@@ -164,6 +248,7 @@ function runPty(extraArgs, timeoutMs, isDone, graceMs = 0) {
       done = true;
       clearTimeout(timer);
       if (graceTimer) clearTimeout(graceTimer);
+      killNewOpencodeCli(cliBefore); // no lingering isolated instances
       resolve({ buf, exitCode, timedOut });
     };
 
@@ -193,6 +278,42 @@ function desktopSnapshot() {
   } catch { return ""; }
 }
 
+// Lingering-instance cleanup: the --standalone opencode-cli can survive the
+// conpty killTree (a survivor also holds the inherited stdout pipe, which
+// hangs pipelines after the node process is long gone). Snapshot the existing
+// opencode-cli PIDs before the spawn; after the run, kill any NEW ones —
+// EXCEPT `serve --service`, which is the user's live Desktop background
+// service even if it happens to (re)start while the test is running.
+function opencodeCliCandidates() {
+  if (process.platform !== "win32") return [];
+  try {
+    const r = spawnSync(
+      "powershell",
+      ["-NoLogo", "-NoProfile", "-Command", "Get-CimInstance Win32_Process -Filter \"Name='opencode-cli.exe'\" | ForEach-Object { \"$($_.ProcessId)|$($_.CommandLine)\" }"],
+      { encoding: "utf8" },
+    );
+    return (r.stdout || "")
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map((line) => {
+        const i = line.indexOf("|");
+        return { pid: Number(line.slice(0, i)), cmd: line.slice(i + 1) };
+      })
+      .filter((x) => Number.isFinite(x.pid) && x.pid > 0);
+  } catch { return []; }
+}
+
+function killNewOpencodeCli(before) {
+  // Only instances THIS test spawned (they carry --standalone in their command
+  // line); never the user's plain TUI/run sessions, and never `serve --service`
+  // — that is the live Desktop background service.
+  for (const { pid, cmd } of opencodeCliCandidates()) {
+    if (!before.has(pid) && /--standalone/.test(cmd) && !/serve --service/.test(cmd)) {
+      try { spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore" }); } catch { /* best effort */ }
+    }
+  }
+}
+
 function diag(r) {
   const clean = stripAnsi(r.buf || "");
   const tail = clean.slice(-1600);
@@ -207,37 +328,51 @@ function diag(r) {
 async function checkA() {
   console.log("\n=== Check A: plugin load (isolated standalone TUI) ===");
 
-  // Stop as soon as the deterministic load marker appears (typically < 5 s).
-  // NOTE: the "Ask anything" prompt is rendered asynchronously by the TUI and
-  // is not a reliable marker (it comes and goes with redraws), so it is only
-  // reported for information — never used to gate.
+  // Early-stop on the first of: the PTY load marker OR the authoritative
+  // log-file entrypoint line (atomic, so its presence implies the full line).
   const r = await runPty(
     ["--standalone", "--print-logs"],
     INIT_TIMEOUT_MS,
-    // Stop on the deterministic load marker; then drain a short grace window so
-    // the (wrapped) tail of the same log line — id/entrypoint=file: — is captured.
-    (buf) => PLUGIN_LOAD_RE.test(buf),
+    (buf) => logHasCheckoutEntrypoint() || PLUGIN_LOAD_RE.test(buf),
     2500,
+    // Isolated global config: the ONLY plugin entry is this checkout.
+    ISOLATED_CONFIG_DIR,
   );
 
-  const loadSeen  = PLUGIN_LOAD_RE.test(r.buf);
-  const repoSeen  = REPO_ENTRY_RE.test(r.buf);
+  if (r.timedOut) {
+    // A cold/slow machine may flush the loading line just after the PTY
+    // timeout — give the private log a short grace before failing.
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+  }
+
+  // Authoritative assertions from the isolated instance's OWN log file.
+  const slice = newLogSlice();
+  const loadSeen  = /msg="loading plugin"/.test(slice);
+  const repoSeen  = slice.includes(`entrypoint=${CHECKOUT_ENTRYPOINT}`);
   const readySeen = /Ask anything/i.test(r.buf) || /Ask anything/i.test(stripAnsi(r.buf));
 
-  console.log(`  plugin loaded:   ${loadSeen ? "\u2713" : "\u2717"}  (msg="loading plugin" \u2192 opencode-context-indicator)`);
-  console.log(`  repo entrypoint: ${repoSeen ? "\u2713" : "\u2717"}  (file:/// \u2192 this checkout, not the npm copy)`);
-  console.log(`  TUI ready:       ${readySeen ? "\u2713" : "\u2013"}  (informational; TUI prompt redraws asynchronously)`);
+  console.log(`  plugin loaded:   ${loadSeen ? "\u2713" : "\u2717"}  (host log: msg="loading plugin")`);
+  console.log(`  checkout source: ${repoSeen ? "\u2713" : "\u2717"}  (host log: entrypoint=${CHECKOUT_ENTRYPOINT})`);
+  console.log(`  TUI ready:       ${readySeen ? "\u2713" : "\u2013"}  (informational; PTY redraws asynchronously)`);
   console.log(`  isolated:        \u2713 (live state.json untouched)`);
 
   if (!loadSeen) {
-    console.error("\n[FAIL] Check A: plugin was not loaded");
+    console.error("\n[FAIL] Check A: the isolated instance never logged a plugin load");
     if (r.timedOut) console.error(`  (timed out after ${INIT_TIMEOUT_MS} ms)`);
     diag(r);
     return false;
   }
   if (!repoSeen) {
-    console.error("\n[WARN] Check A: plugin loaded, but not from this checkout's file:// entrypoint.");
-    console.error("       Your global config may point at the published npm package instead.");
+    // Fail-closed: the isolated config pins the plugin to THIS checkout, so a
+    // missing checkout entrypoint means the OPENCODE_CONFIG_DIR override was
+    // not honored (older host build) or the log line format changed — either
+    // way the e2e no longer proves what it claims to prove.
+    console.error("\n[FAIL] Check A: plugin loaded, but NOT from this checkout's file:// entrypoint.");
+    console.error(`       expected entrypoint=${CHECKOUT_ENTRYPOINT}`);
+    console.error("       The isolated config (OPENCODE_CONFIG_DIR -> %TEMP%/oci-e2e-config) may not");
+    console.error("       be honored by this CLI build, or the log line format changed.");
+    diag(r);
+    return false;
   }
 
   console.log("\n[PASS] Check A: plugin loaded in the isolated instance");

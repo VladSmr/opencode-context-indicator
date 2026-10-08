@@ -5,6 +5,13 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    # Daily drift-watch: catch a host OpenTUI bump even without repo pushes
+    # (opencode bumps OpenTUI every few releases; the pin must be re-aligned).
+    # NOTE: GitHub auto-parks scheduled workflows after 60 days of repo
+    # inactivity - a push or a manual workflow_dispatch re-enables them.
+    - cron: "17 6 * * *"
+  workflow_dispatch:
 
 jobs:
   test:
@@ -20,11 +27,25 @@ jobs:
 
       - run: npm ci
 
+      # Typecheck the TUI entry (tui.tsx + its lib/* imports, allowJs).
+      # Kept out of prepublish.mjs: it needs the full devDependency tree.
+      # --no-install: never fall back to fetching a random `tsc` package from
+      # the registry; if typescript is missing, fail loudly instead.
+      - run: npx --no-install tsc --noEmit
+
       # Run the full prepublish gate (a–f): tarball composition, tui.tsx
       # pragma regression check via the esbuild PROGRAMMATIC API, resolve
-      # chain, unit harness T1–T12, the corporate-identifier scan and the
+      # chain (host-bridged + peer packages + the local lib import), the
+      # unit harness T1–T16i, the corporate-identifier scan and the
       # non-English (non-ASCII letter) scan.
       # Single source of truth, identical on Windows and Linux: the API
       # spawns the native esbuild binary with correct executable semantics
       # instead of `node <cli-bin>`, which breaks on Linux (ELF vs JS).
       - run: node test/prepublish.mjs
+
+      # OpenTUI pin drift-watch: the exact @opentui/solid pin must match the
+      # OpenTUI catalog of the latest RELEASED opencode (npm registry -> tag ->
+      # catalog). Fails when the host bumped OpenTUI and the pin needs
+      # re-alignment, so an npm install of the plugin never pairs our JSX
+      # runtime with a foreign renderer version.
+      - run: node test/drift-watch.mjs
