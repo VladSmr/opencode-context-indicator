@@ -12,5 +12,5 @@
     "allowJs": true,
     "types": ["node"]
   },
-  "include": ["tui.tsx"]
+  "include": ["tui.tsx", "lib/**/*.tsx"]
 }

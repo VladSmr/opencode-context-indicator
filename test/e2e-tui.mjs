@@ -43,6 +43,7 @@ import {
   statSync,
   unlinkSync,
   accessSync,
+  existsSync,
   mkdirSync,
   writeFileSync,
   rmSync,
@@ -101,6 +102,11 @@ const ISOLATED_DATA       = join(tmpdir(), "oci-e2e-xdg-data");
 const ISOLATED_CACHE      = join(tmpdir(), "oci-e2e-xdg-cache");
 const ISOLATED_STATE_ROOT = join(tmpdir(), "oci-e2e-xdg-state");
 const ISOLATED_LOG        = join(ISOLATED_DATA, "opencode", "log", "opencode.log");
+// Stamp the ./tui entry writes when the e2e marker env is set (Check A only):
+// proof that setup() ran to completion (slots + keymap registered). The TUI
+// captures console output, so a log-based marker is unreachable; a file is
+// host-agnostic and deterministic.
+const TUI_LIVE_STAMP      = join(tmpdir(), "opencode-context-indicator", "tui-live.stamp");
 
 function writeIsolatedConfig() {
   const entrypoint = pathToFileURL(repoRoot).href;
@@ -110,8 +116,10 @@ function writeIsolatedConfig() {
   mkdirSync(ISOLATED_CONFIG_DIR, { recursive: true });
   writeFileSync(join(ISOLATED_CONFIG_DIR, "opencode.json"), JSON.stringify(config, null, 2), "utf8");
   // Clean slate for the private log tree (XDG_DATA_HOME, Check A only): the
-  // assertions must only ever see THIS run's lines.
+  // assertions must only ever see THIS run's lines. Same for the live-surface
+  // stamp (a stale stamp from a previous run would fake a pass).
   rmSync(ISOLATED_DATA, { recursive: true, force: true });
+  try { unlinkSync(TUI_LIVE_STAMP); } catch { /* ok */ }
 }
 writeIsolatedConfig();
 
@@ -130,6 +138,8 @@ function childEnv(configDir) {
     env.XDG_DATA_HOME = ISOLATED_DATA;
     env.XDG_CACHE_HOME = ISOLATED_CACHE;
     env.XDG_STATE_HOME = ISOLATED_STATE_ROOT;
+    // Ask the ./tui entry to write its live-surface stamp (Check A assertion).
+    env.OPENCODE_CONTEXT_INDICATOR_TUI_MARKER = "1";
   }
   return env;
 }
@@ -273,7 +283,12 @@ function desktopSnapshot() {
   if (process.platform !== "win32") return "";
   const psCmd = 'Get-CimInstance Win32_Process | Where-Object { ($_.Name -eq \'OpenCode.exe\') -or ($_.Name -eq \'opencode-cli.exe\' -and $_.CommandLine -like \'*serve --service*\') } | Sort-Object ProcessId | ForEach-Object { "$($_.ProcessId) $($_.Name)" }';
   try {
-    const r = spawnSync("powershell", ["-NoLogo", "-NoProfile", "-Command", psCmd], { encoding: "utf8" });
+    const r = spawnSync(
+      "powershell",
+      ["-NoLogo", "-NoProfile", "-Command", psCmd],
+      // Hard timeout: a stuck WMI/CIM service must not hang the whole e2e.
+      { encoding: "utf8", timeout: 15_000 },
+    );
     return (r.stdout || "").trim();
   } catch { return ""; }
 }
@@ -290,7 +305,8 @@ function opencodeCliCandidates() {
     const r = spawnSync(
       "powershell",
       ["-NoLogo", "-NoProfile", "-Command", "Get-CimInstance Win32_Process -Filter \"Name='opencode-cli.exe'\" | ForEach-Object { \"$($_.ProcessId)|$($_.CommandLine)\" }"],
-      { encoding: "utf8" },
+      // Hard timeout: a stuck WMI/CIM service must not hang the whole e2e.
+      { encoding: "utf8", timeout: 15_000 },
     );
     return (r.stdout || "")
       .split(/\r?\n/)
@@ -309,7 +325,7 @@ function killNewOpencodeCli(before) {
   // — that is the live Desktop background service.
   for (const { pid, cmd } of opencodeCliCandidates()) {
     if (!before.has(pid) && /--standalone/.test(cmd) && !/serve --service/.test(cmd)) {
-      try { spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore" }); } catch { /* best effort */ }
+      try { spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore", timeout: 10_000 }); } catch { /* best effort */ }
     }
   }
 }
@@ -345,14 +361,29 @@ async function checkA() {
     await new Promise((resolve) => setTimeout(resolve, 3000));
   }
 
-  // Authoritative assertions from the isolated instance's OWN log file.
+  // Authoritative assertions:
+  //   - load + checkout entrypoint: from the isolated instance's OWN log file
+  //     (atomic lines, immune to PTY interleaving).
+  //   - live surfaces registered: the tui-live.stamp file the ./tui entry
+  //     writes when the e2e marker env is set (the TUI captures console
+  //     output, so a log-based marker is unreachable; a file is
+  //     host-agnostic and deterministic).
   const slice = newLogSlice();
   const loadSeen  = /msg="loading plugin"/.test(slice);
   const repoSeen  = slice.includes(`entrypoint=${CHECKOUT_ENTRYPOINT}`);
+  // The early-stop can fire on the server-side loading line BEFORE the TUI
+  // entry's setup() has written the stamp — poll briefly instead of failing
+  // on a cold/slow machine (up to ~5 s).
+  let liveMarkerSeen = existsSync(TUI_LIVE_STAMP);
+  for (let i = 0; !liveMarkerSeen && i < 20; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    liveMarkerSeen = existsSync(TUI_LIVE_STAMP);
+  }
   const readySeen = /Ask anything/i.test(r.buf) || /Ask anything/i.test(stripAnsi(r.buf));
 
   console.log(`  plugin loaded:   ${loadSeen ? "\u2713" : "\u2717"}  (host log: msg="loading plugin")`);
   console.log(`  checkout source: ${repoSeen ? "\u2713" : "\u2717"}  (host log: entrypoint=${CHECKOUT_ENTRYPOINT})`);
+  console.log(`  live surfaces:   ${liveMarkerSeen ? "\u2713" : "\u2717"}  (tui-live.stamp written by setup())`);
   console.log(`  TUI ready:       ${readySeen ? "\u2713" : "\u2013"}  (informational; PTY redraws asynchronously)`);
   console.log(`  isolated:        \u2713 (live state.json untouched)`);
 
@@ -371,6 +402,13 @@ async function checkA() {
     console.error(`       expected entrypoint=${CHECKOUT_ENTRYPOINT}`);
     console.error("       The isolated config (OPENCODE_CONFIG_DIR -> %TEMP%/oci-e2e-config) may not");
     console.error("       be honored by this CLI build, or the log line format changed.");
+    diag(r);
+    return false;
+  }
+  if (!liveMarkerSeen) {
+    console.error("\n[FAIL] Check A: the live TUI surfaces were not registered");
+    console.error("       The ./tui entry died between plugin load and setup() — most likely a");
+    console.error("       host-transform / import failure inside the TUI file itself.");
     diag(r);
     return false;
   }

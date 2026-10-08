@@ -85,39 +85,55 @@ pass(`tarball: ${[...fileMembers].join(", ")} (${fileMembers.size} members, no d
 // native ELF binary — node then parses it as JS and throws
 // `SyntaxError: Invalid or unexpected token`.
 // ---------------------------------------------------------------------------
-console.log("\n(b) tui.tsx transpilation (esbuild transform, jsx=automatic)...");
-const tuiSource = readFileSync(join(repoRoot, "tui.tsx"), "utf8");
+console.log("\n(b) tui.tsx + lib/*.tsx transpilation (esbuild transform, jsx=automatic)...");
+// The npm path relies on each TUI file's own line-1 pragma (the host skips the
+// Solid transform for node_modules paths), so EVERY .tsx of the entry — the
+// file itself and the imported components — must carry the pragma and compile
+// against @opentui/solid/jsx-runtime. A regression in any one of them would
+// ship undetected otherwise.
+const tsxFiles = [
+  "tui.tsx",
+  ...readdirSync(join(repoRoot, "lib"))
+    .filter((f) => f.endsWith(".tsx"))
+    .sort()
+    .map((f) => join("lib", f)),
+];
+let checked = 0;
+for (const rel of tsxFiles) {
+  const source = readFileSync(join(repoRoot, rel), "utf8");
 
-let transpiled;
-try {
-  transpiled = transformSync(tuiSource, {
-    loader: "tsx",
-    jsx: "automatic",
-    format: "esm",
-  }).code;
-} catch (e) {
-  fatal(`esbuild failed: ${((e && e.message) || String(e)).slice(0, 300)}`);
+  let transpiled;
+  try {
+    transpiled = transformSync(source, {
+      loader: "tsx",
+      jsx: "automatic",
+      format: "esm",
+    }).code;
+  } catch (e) {
+    fatal(`esbuild failed for ${rel}: ${((e && e.message) || String(e)).slice(0, 300)}`);
+  }
+  if (!transpiled.includes("@opentui/solid/jsx-runtime")) {
+    fatal(`${rel}: transpiled output missing @opentui/solid/jsx-runtime — pragma may be missing`);
+  }
+  if (transpiled.includes("react/jsx-runtime")) {
+    fatal(`${rel}: transpiled output contains react/jsx-runtime — pragma regression detected`);
+  }
+  // Bare `opencode` specifiers (e.g. `import "opencode/process"`) are NOT bridged
+  // by the opencode TUI runtime loader: ensureRuntimePluginSupport only remaps
+  // `@opencode/plugin/tui` to the synthetic host module. A bare specifier resolves
+  // to package `opencode`, which exists only inside the opencode monorepo, so the
+  // real TUI throws `Cannot find package 'opencode'`. Guard against reintroducing
+  // one. The quote anchor excludes the legitimate `@opencode/*` scoped imports.
+  if (/["']opencode(\/|["'])/.test(transpiled)) {
+    fatal(`${rel}: transpiled output imports a bare 'opencode' specifier — not bridged at runtime`);
+  }
+  const firstLine = source.split("\n")[0];
+  if (!firstLine.startsWith("/** @jsxImportSource @opentui/solid */")) {
+    fatal(`${rel}: first line is not the pragma: ${firstLine}`);
+  }
+  checked++;
 }
-if (!transpiled.includes("@opentui/solid/jsx-runtime")) {
-  fatal("transpiled output missing @opentui/solid/jsx-runtime — pragma may be missing");
-}
-if (transpiled.includes("react/jsx-runtime")) {
-  fatal("transpiled output contains react/jsx-runtime — pragma regression detected");
-}
-// Bare `opencode` specifiers (e.g. `import "opencode/process"`) are NOT bridged
-// by the opencode TUI runtime loader: ensureRuntimePluginSupport only remaps
-// `@opencode/plugin/tui` to the synthetic host module. A bare specifier resolves
-// to package `opencode`, which exists only inside the opencode monorepo, so the
-// real TUI throws `Cannot find package 'opencode'`. Guard against reintroducing
-// one. The quote anchor excludes the legitimate `@opencode/*` scoped imports.
-if (/["']opencode(\/|["'])/.test(transpiled)) {
-  fatal("transpiled output imports a bare 'opencode' specifier — not bridged at runtime");
-}
-const firstLine = tuiSource.split("\n")[0];
-if (!firstLine.startsWith("/** @jsxImportSource @opentui/solid */")) {
-  fatal(`first line is not the pragma: ${firstLine}`);
-}
-pass("pragma intact: @opentui/solid/jsx-runtime present, react absent");
+pass(`pragma intact in ${checked} tsx file(s): @opentui/solid/jsx-runtime present, react absent`);
 
 // ---------------------------------------------------------------------------
 // (c) resolve chain — @opentui/solid + solid-js resolvable from tui.tsx context

@@ -26,7 +26,16 @@ const checks = [
 // require rooted AT tui.tsx — the same base directory the TUI loader uses.
 // (createRequire from @opencode/plugin/tui cannot resolve repo-relative paths,
 // which is why these need their own resolver.)
-const localChecks = [["./lib/contributors.js", true]];
+const localChecks = [
+  ["./lib/contributors.js", true],
+  ["./lib/tui-data.js", true],
+  ["./lib/tui-theme.js", true],
+  // Extensionless TSX imports: node's CJS resolver cannot resolve them (no
+  // .tsx extension search), but the TUI host (Bun) resolves TS/TSX extensions
+  // for relative imports — so verify the file exists next to tui.tsx instead.
+  ["./lib/tui-sidebar", true, [".tsx"]],
+  ["./lib/tui-panel", true, [".tsx"]],
+];
 const tuiRequire = createRequire(
   pathToFileURL(path.join(__dirname, "..", "tui.tsx")).href,
 );
@@ -46,18 +55,31 @@ for (const [pkg, mustResolve] of checks) {
     }
   }
 }
-for (const [spec, mustResolve] of localChecks) {
+const fs = require("fs");
+for (const [spec, mustResolve, extensions] of localChecks) {
+  let resolved = null;
   try {
-    const r = tuiRequire.resolve(spec);
-    if (mustResolve) console.log("OK " + spec + " -> " + r);
-    else console.log("UNEXPECTED_OK " + spec + " -> " + r);
+    resolved = tuiRequire.resolve(spec);
   } catch (e) {
-    if (mustResolve) {
-      console.error("FAILED " + spec + ": " + e.code);
-      failed++;
-    } else {
-      console.log("EXPECTED_FAIL " + spec + ": " + e.code);
+    // Fall through to the explicit-extension existence check below.
+  }
+  if (!resolved && Array.isArray(extensions)) {
+    for (const ext of extensions) {
+      const candidate = path.join(__dirname, "..", spec.replace(/^\.\//, "") + ext);
+      if (fs.existsSync(candidate)) {
+        resolved = candidate;
+        break;
+      }
     }
+  }
+  if (resolved) {
+    if (mustResolve) console.log("OK " + spec + " -> " + resolved);
+    else console.log("UNEXPECTED_OK " + spec + " -> " + resolved);
+  } else if (mustResolve) {
+    console.error("FAILED " + spec + " (no resolver match, no candidate file)");
+    failed++;
+  } else {
+    console.log("EXPECTED_FAIL " + spec);
   }
 }
 if (failed > 0) process.exit(1);
