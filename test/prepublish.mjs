@@ -277,7 +277,40 @@ const seedState = {
     categories:{user:1,assistant:1,reasoning:0,toolArgs:0,system:1,toolSchemas:1,other:1},
     updatedAt:"2026-09-29T15:30:00.000Z",
   },
+  // T17 (tombstone prune): dates computed at seed time so the test is immune
+  // to suite aging. Unique model names — these entries must never win the
+  // freshest-wins limit seeding for a model another test asserts on.
+  ses_T17_OLD: {
+    sessionID:"ses_T17_OLD",parentID:null,role:"main",agent:null,
+    model:"model-tombstone-old",providerID:"test-provider",ctx:1,input:1,
+    usable:180000,limit:200000,reasoning:0,
+    categories:{user:1,assistant:1,reasoning:0,toolArgs:0,system:1,toolSchemas:1,other:1},
+    updatedAt:new Date(Date.now() - 40 * 86400e3).toISOString(),
+  },
+  ses_T17_FRESH: {
+    sessionID:"ses_T17_FRESH",parentID:null,role:"main",agent:null,
+    model:"model-tombstone-fresh",providerID:"test-provider",ctx:1,input:1,
+    usable:180000,limit:200000,reasoning:0,
+    categories:{user:1,assistant:1,reasoning:0,toolArgs:0,system:1,toolSchemas:1,other:1},
+    updatedAt:new Date(Date.now() - 1 * 86400e3).toISOString(),
+  },
 };
+
+// Age-immunity refresh: the state.js tombstone prune (PRUNE_AFTER_MS = 30
+// days) would eventually eat the hardcoded 2026-09-29 seed dates and break
+// the suite. Re-stamp every seeded entry (except the T17 pair, which manages
+// its own dates) to ~10 days ago, preserving the original relative ordering
+// — T9_OLD/T9_NEW and T10_A/T10_B freshest-wins semantics stay intact.
+{
+  const exempt = new Set(["ses_T17_OLD", "ses_T17_FRESH"]);
+  const stampable = Object.entries(seedState)
+    .filter(([k, v]) => !exempt.has(k) && Number.isFinite(Date.parse(v.updatedAt)))
+    .sort((a, b) => Date.parse(a[1].updatedAt) - Date.parse(b[1].updatedAt));
+  const base = Date.now() - 10 * 86400e3;
+  stampable.forEach(([k, v], i) => {
+    seedState[k].updatedAt = new Date(base + i * 60000).toISOString();
+  });
+}
 
 writeFileSync(HARNESS_STATE, JSON.stringify(seedState), "utf8");
 process.env.OPENCODE_CONTEXT_INDICATOR_STATE_FILE = HARNESS_STATE;
@@ -302,7 +335,9 @@ const quietErr = (fn) => {
 };
 
 let failed = 0;
+let ranChecks = 0; // auto-counted: the hardcoded totals drifted from reality
 const check = (name, fn) => {
+  ranChecks++;
   try { fn(); console.log(`  ✓ ${name}`); }
   catch (e) { console.error(`  ✗ ${name}: ${e.message}`); failed++; }
 };
@@ -444,7 +479,7 @@ check("T12 usable < limit is LEGITIMATE, seeded", () => {
 });
 
 if (failed) fatal(`${failed} unit test(s) failed`);
-pass("all 12 unit checks passed");
+pass(`all ${ranChecks} unit checks passed`);
 
 // ---------------------------------------------------------------------------
 // T13+ — lib/contributors.js pure-helper tests + new formula cases
@@ -718,8 +753,23 @@ check("T16i reserveFor: non-finite window returns null", () => {
   assert(mod.reserveFor(undefined, undefined) == null);
 });
 
+check("T17 state tombstone prune: month-old entries drop, fresh survive", () => {
+  // Isolation: earlier writeStateFile calls in this suite (T2/T3/T8) may have
+  // already pruned ses_T17_OLD via their own writes — re-seed the pair so this
+  // check proves the prune on its own write, not a leftover from an earlier
+  // one. Dates were computed at seed time (40d / 1d ago).
+  const cur = read();
+  cur.ses_T17_OLD = seedState.ses_T17_OLD;
+  cur.ses_T17_FRESH = seedState.ses_T17_FRESH;
+  writeFileSync(HARNESS_STATE, JSON.stringify(cur), "utf8");
+  mod.writeStateFile("ses_MAIN", "model-alpha", "test-provider", 279000, 279312, 0);
+  const snap = read();
+  assert(!("ses_T17_OLD" in snap), "40-day-old entry should be pruned");
+  assert("ses_T17_FRESH" in snap, "1-day-old entry should survive");
+});
+
 if (failed) fatal(`${failed} unit test(s) failed`);
-pass(`all ${12 + 22} unit checks passed (T1–T12 + T13–T16i)`);
+pass(`all ${ranChecks} unit checks passed (T1–T12 + T13–T17)`);
 
 // ---------------------------------------------------------------------------
 // (e) corporate-identifier scan — no employer/vendor-specific names may appear

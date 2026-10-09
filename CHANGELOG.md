@@ -4,7 +4,21 @@ Notable user-facing changes per release. Dates are commit days (UTC).
 The package also ships a dual V1/V2 plugin — see the README for the surface
 matrix; everything below concerns the V2 path unless stated otherwise.
 
-## 1.3.0 — unreleased
+## 1.3.1 — 2026-10-09
+
+- The npm `description` and `keywords` now describe the current feature set
+  (panel, cost, picker) instead of the original "log file + sidebar".
+- `/context` and `/context-breakdown` instructions are tag-delimited
+  (`<context-summary>` / `<context-breakdown>`): models sometimes echoed the
+  instruction line itself into the reply; the tags give an unambiguous payload
+  boundary. The human-readable log receives the body only, without the
+  instruction block.
+- `state.json` hygiene: entries untouched for 30 days are pruned on the next
+  write (deleted / abandoned sessions used to linger until the LRU cap).
+  Resuming a month-old session re-derives its inherited fields once and
+  self-heals on the next event.
+
+## 1.3.0 — 2026-10-09
 
 Highlights: per-session cost in `/cx` (family-aggregated for the main session),
 a searchable family-session picker, and `/cx` reachable from subagent session
