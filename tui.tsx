@@ -38,7 +38,7 @@
  *
  * Runtime requirements: @opentui/core and solid-js are optional peers resolved
  * by OpenCode at runtime. @opentui/solid is a pinned direct dependency (exact
- * 0.5.16): OpenCode's TUI loader does not expose a host instance of it, so for
+ * 0.5.17): OpenCode's TUI loader does not expose a host instance of it, so for
  * npm-installed plugins the JSX pragma would otherwise fail to resolve
  * `@opentui/solid/jsx-runtime` (upstream opencode issue #33884).
  *
@@ -138,6 +138,15 @@ export default Plugin.define({
                 id: "context-indicator.breakdown",
                 title: "Context breakdown panel",
                 slash: { name: "cx" },
+                // Palette-visible AND directly bound: subagent session views
+                // force the composer into its "subagents" tab, which pushes
+                // keymap mode "composer" — the base-mode palette binding
+                // (ctrl+p) is inert there and there is no prompt to type /cx.
+                // A bind on this mode:"global" layer fires in every mode
+                // (leader matches <leader>b "toggle sidebar"; f4 as a direct
+                // single-chord fallback).
+                palette: true,
+                bind: "<leader>c,f4",
                 run: () => {
                   const panelApi = context?.ui?.panel
                   if (panelApi && typeof panelApi.open === "function") {

@@ -3,6 +3,8 @@
 Real-time **context-window usage** indicator for [OpenCode](https://opencode.ai),
 with a **per-category token breakdown** and an optional **terminal-UI sidebar**.
 
+User-facing changes per release: [CHANGELOG.md](./CHANGELOG.md).
+
 It tells you how full the current model's context window is, and *what* is
 filling it: system prompt, tool schemas, user/assistant text, reasoning, tool
 arguments and the residual "other" bucket.
@@ -10,7 +12,7 @@ arguments and the residual "other" bucket.
 The package ships a **dual V1 + V2 plugin** (one entry works in both OpenCode
 generations) plus an optional TUI module (`./tui` entry) that renders a **live
 sidebar** and a **zero-LLM `/cx` breakdown panel** with measured contributors
-and a redacted export. The V2 path is **tested against opencode v2.0.25**; the
+and a redacted export. The V2 path is **tested against opencode v2.0.26**; the
 V1 path against 1.18.29+.
 
 > **V1 is feature-frozen.** It is kept working for compatibility (bug fixes
@@ -240,7 +242,20 @@ back to a plain notice if needed.
 `/cx` opens a full `session.panel` showing the breakdown for the current session
 **and its subagent descendants**, read from the same `state.json` bridge as the
 sidebar. Keys: `/cx` opens, `esc` closes, `r` refreshes (re-read the bridge),
-`e` exports a redacted snapshot.
+`e` exports a redacted snapshot, `s` picks a family session.
+
+Every row carries a **cost** column read from the host data layer: a main
+session shows the **family-aggregated** spend, each subagent its own — no more
+invisible subagent spend (upstream #45417). `s` opens a searchable picker over
+all family sessions (title / model / cost / running marker); `Enter` navigates
+there — root sessions focus their tab, subagent sessions switch the route.
+
+Works from **subagent session views too**: those views have no prompt input
+(the composer switches to its subagents tab), so `/cx` is also registered in
+the command palette and bound to `<leader>c` / `f4` — both fire from any
+session view (the palette itself is only reachable outside the composer).
+Opened from a subagent view, the family is rooted at the topmost ancestor, so
+the whole family is shown, not just the child subtree.
 
 **Zero LLM calls.** Unlike `/context` and `/context-breakdown` (which run a real
 agent turn so the model renders the table), the panel only reads local TUI data
@@ -437,13 +452,13 @@ the sidebar instead.
   gracefully (the breakdown falls back to throttled `session.messages` fetches
   and toasts keep working).
 * **OpenCode ≥ 2.0.16** for the V2 path (built and verified against
-  **2.0.25**).
+  **2.0.26**).
 * **TUI sidebar**: terminal TUI only, requires the OpenTUI rendering stack that
   ships with OpenCode. `@opentui/core` and `solid-js` are **optional** peer
   dependencies resolved by OpenCode at runtime; the main plugin installs and runs
   fine without them (the sidebar simply is not available). `@opentui/solid` is
-  instead shipped as a **pinned direct dependency** (exact `0.5.16`, matching
-  the OpenTUI stack OpenCode 2.0.25 ships): OpenCode's
+  instead shipped as a **pinned direct dependency** (exact `0.5.17`, matching
+  the OpenTUI stack OpenCode 2.0.26 ships): OpenCode's
   TUI loader does not expose a host instance of it, so for npm-installed plugins
   the JSX pragma would otherwise fail to resolve `@opentui/solid/jsx-runtime`
   (upstream: opencode issue #33884 — `node_modules` plugins are excluded from the

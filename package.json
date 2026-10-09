@@ -1,6 +1,6 @@
 {
   "name": "opencode-context-indicator",
-  "version": "1.2.2",
+  "version": "1.3.0",
   "description": "Real-time OpenCode context-window usage indicator: per-category token breakdown written to a log file, plus an optional TUI sidebar. Dual V1 + V2 plugin entry.",
   "type": "module",
   "license": "MIT",
@@ -13,6 +13,7 @@
     "lib/",
     "tui.tsx",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "engines": {
@@ -56,11 +57,11 @@
     }
   },
   "dependencies": {
-    "@opentui/solid": "0.5.16"
+    "@opentui/solid": "0.5.17"
   },
   "devDependencies": {
-    "@opencode/plugin": "^2.0.19",
-    "@opentui/core": "0.5.16",
+    "@opencode/plugin": "2.0.26",
+    "@opentui/core": "0.5.17",
     "@types/node": "26.6.3",
     "esbuild": "^0.28.2",
     "node-pty": "^1.1.0",

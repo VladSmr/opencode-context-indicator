@@ -43,7 +43,9 @@ const declaredFiles = pkgMeta.files || [];
 // LICENSE, README.md, index.js, package.json, tui.tsx (5 files); the lib/
 // member count is computed from the directory so the index.js module split is
 // reflected automatically instead of needing a hardcoded number.
-const BASE_MEMBER_COUNT = 5;
+// Base files in `files[]` outside lib/ (index.js, package.json, tui.tsx,
+// README.md, CHANGELOG.md, LICENSE).
+const BASE_MEMBER_COUNT = 6;
 const fileMembers = new Set(["LICENSE","README.md","index.js","package.json","tui.tsx"]);
 let libMemberCount = 0;
 declaredFiles.forEach((f) => {

@@ -31,6 +31,7 @@ const pkg = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8"));
 const ours = {
   solid: pkg.dependencies?.["@opentui/solid"],
   core: pkg.devDependencies?.["@opentui/core"],
+  hostPlugin: pkg.devDependencies?.["@opencode/plugin"],
 };
 
 async function fetchJson(url) {
@@ -111,4 +112,27 @@ if (ours.solid !== host.solid || ours.core !== host.core) {
   process.exit(1);
 }
 
-console.log("[drift-watch OK] OpenTUI pin aligned with the released host.");
+// The host plugin package version == the released opencode version (same
+// monorepo release train). Its TYPES feed tsc for the TUI entry (Context /
+// Keymap / Dialog interfaces), so the devDep must track the released host
+// just like the OpenTUI pin — stale types pass tsc while the runtime surface
+// has moved.
+let hostPlugin;
+try {
+  const pluginLatest = await fetchJson("https://registry.npmjs.org/@opencode/plugin/latest");
+  hostPlugin = pluginLatest?.version;
+  if (typeof hostPlugin !== "string" || !/^\d+\.\d+\.\d+$/.test(hostPlugin)) {
+    fail(`npm registry returned an unusable @opencode/plugin version: ${JSON.stringify(hostPlugin)}`);
+  }
+} catch (err) {
+  fail(`cannot read @opencode/plugin latest from the npm registry: ${err?.message ?? err}`);
+}
+console.log(`plugin types: @opencode/plugin host=${hostPlugin}  ours=${ours.hostPlugin}`);
+if (ours.hostPlugin !== hostPlugin) {
+  console.error("");
+  console.error("[drift-watch FAIL] @opencode/plugin (types devDep) drift detected.");
+  console.error(`    devDependencies["@opencode/plugin"] ${ours.hostPlugin} -> ${hostPlugin}`);
+  process.exit(1);
+}
+
+console.log("[drift-watch OK] OpenTUI pin + @opencode/plugin types aligned with the released host.");
