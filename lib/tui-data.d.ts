@@ -9,6 +9,7 @@ export interface Categories {
   assistant?: number
   reasoning?: number
   toolArgs?: number
+  toolOut?: number
   system?: number | null
   toolSchemas?: number | null
   other?: number

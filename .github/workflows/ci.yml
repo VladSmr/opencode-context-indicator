@@ -36,7 +36,7 @@ jobs:
       # Run the full prepublish gate (a–f): tarball composition, tui.tsx
       # pragma regression check via the esbuild PROGRAMMATIC API, resolve
       # chain (host-bridged + peer packages + the local lib import), the
-      # unit harness T1–T16i, the corporate-identifier scan and the
+      # unit harness T1–T18, the corporate-identifier scan and the
       # non-English (non-ASCII letter) scan.
       # Single source of truth, identical on Windows and Linux: the API
       # spawns the native esbuild binary with correct executable semantics

@@ -768,8 +768,127 @@ check("T17 state tombstone prune: month-old entries drop, fresh survive", () => 
   assert("ses_T17_FRESH" in snap, "1-day-old entry should survive");
 });
 
+const t18ToolResult = (result) => ({
+  sessionID: "t18probe",
+  messages: [{ role: "user", content: [{ type: "tool-result", name: "probe", result }] }],
+  system: [],
+  tools: {},
+});
+
+check("T18 toolOut: estimator counts text/json/content results, skips file parts", () => {
+  const text = mod.estimateBreakdownFromContext(
+    t18ToolResult({ type: "text", value: "a".repeat(32) }), null,
+  ).toolOutChars;
+  assert(text === 8, `32 latin chars should estimate to 8 tokens, got ${text}`);
+  const json = mod.estimateBreakdownFromContext(
+    t18ToolResult({ type: "json", value: { big: "object" } }), null,
+  ).toolOutChars;
+  assert(json === 4, `'{"big":"object"}' (16 chars) should estimate to 4, got ${json}`);
+  const content = mod.estimateBreakdownFromContext(
+    t18ToolResult({
+      type: "content",
+      value: [{ type: "text", text: "out" }, { type: "file", uri: "file:///x", mime: "text/plain" }],
+    }), null,
+  ).toolOutChars;
+  const textOnly = mod.estimateBreakdownFromContext(
+    t18ToolResult({ type: "text", value: "out" }), null,
+  ).toolOutChars;
+  assert(content === textOnly, "content should count only its text items (file skipped)");
+  const fileOnly = mod.estimateBreakdownFromContext(
+    t18ToolResult({ type: "content", value: [{ type: "file", uri: "file:///x", mime: "application/pdf" }] }), null,
+  ).toolOutChars;
+  assert(fileOnly === 0, "file-only result must not be char-estimated");
+  // Results also ride in the dedicated "tool" role (host message normalisation):
+  // the counter must be role-independent.
+  const toolRole = mod.estimateBreakdownFromContext(
+    {
+      sessionID: "t18probe",
+      messages: [{ role: "tool", content: [{ type: "tool-result", name: "probe", result: { type: "text", value: "a".repeat(32) } }] }],
+      system: [],
+      tools: {},
+    },
+    null,
+  ).toolOutChars;
+  assert(toolRole === 8, `role:"tool" results must count too, got ${toolRole}`);
+});
+
+check("T18a toolOut: fallback counts persisted tool state.content (SessionMessageInfo shape)", () => {
+  // SessionMessageToolStateCompleted carries the payload in state.content
+  // (ToolContent[]: {type:"text",text}|{type:"file",uri,mime}) — there is no
+  // state.output field on the persisted shape.
+  const parts = mod.estimateBreakdownFromClientMessages([
+    { type: "assistant", content: [
+      {
+        type: "tool",
+        state: {
+          status: "completed",
+          input: { cmd: "x" },
+          content: [{ type: "text", text: "r".repeat(40) }, { type: "file", uri: "file:///x", mime: "text/plain" }],
+        },
+      },
+    ]},
+  ]);
+  assert(parts.toolOutChars === 10, `40 latin chars -> 10 tokens, got ${parts.toolOutChars}`);
+  assert(parts.systemChars == null && parts.toolSchemasChars == null, "hook-only cells stay null");
+  const unresolved = mod.estimateBreakdownFromClientMessages([
+    { type: "assistant", content: [{ type: "tool", state: { status: "running", input: { cmd: "x" } } }] },
+  ]);
+  assert(unresolved.toolOutChars === 0, "no content yet (running) -> 0");
+  // Errored tools also carry their payload in state.content (optional there).
+  const errored = mod.estimateBreakdownFromClientMessages([
+    { type: "assistant", content: [
+      {
+        type: "tool",
+        state: {
+          status: "error",
+          input: { cmd: "x" },
+          error: "boom",
+          content: [{ type: "text", text: "e".repeat(20) }],
+        },
+      },
+    ]},
+  ]);
+  assert(errored.toolOutChars === 5, `20 latin chars -> 5 tokens, got ${errored.toolOutChars}`);
+});
+
+check("T18b toolOut: hook -> cache -> state.json category + residual reconciliation", () => {
+  mod.onV2Context({
+    sessionID: "ses_T18B",
+    messages: [
+      { role: "user", content: [
+        { type: "tool-result", name: "webfetch", result: { type: "text", value: "w".repeat(400) } },
+      ]},
+    ],
+    system: [{ type: "text", text: "sys" }],
+    tools: {},
+  });
+  mod.writeStateFile("ses_T18B", "model-alpha", "test-provider", 1000, 900, 0);
+  const e18 = read().ses_T18B;
+  assert(e18 && e18.categories.toolOut === 100, `toolOut should persist as 100, got ${e18?.categories?.toolOut}`);
+  const c = e18.categories;
+  const sum = c.user + c.assistant + c.reasoning + c.toolArgs + (c.toolOut || 0) +
+    (c.system || 0) + (c.toolSchemas || 0) + c.other;
+  assert(sum === e18.input, `categories + other must reconcile to input (${sum} != ${e18.input})`);
+});
+
+check("T18c toolOut: legacy entry without the field normalises to 0", () => {
+  const cur = read();
+  cur.ses_T18C = {
+    sessionID: "ses_T18C", parentID: null, role: "main", agent: null,
+    model: "model-alpha", providerID: "test-provider", ctx: 100, input: 100,
+    usable: 180000, limit: 200000, reasoning: 0,
+    categories: { user: 1, assistant: 1, reasoning: 0, toolArgs: 1, system: null, toolSchemas: null, other: 97 },
+    updatedAt: new Date().toISOString(),
+  };
+  writeFileSync(HARNESS_STATE, JSON.stringify(cur), "utf8");
+  mod.writeStateFile("ses_T18C", "model-alpha", "test-provider", 100, 100, 0);
+  const c2 = read().ses_T18C.categories;
+  assert(c2.toolOut === 0, `legacy toolOut should normalise to 0, got ${c2.toolOut}`);
+  assert(c2.other === 97, `other must stay the legacy residual, got ${c2.other}`);
+});
+
 if (failed) fatal(`${failed} unit test(s) failed`);
-pass(`all ${ranChecks} unit checks passed (T1–T12 + T13–T17)`);
+pass(`all ${ranChecks} unit checks passed (T1–T12 + T13–T18)`);
 
 // ---------------------------------------------------------------------------
 // (e) corporate-identifier scan — no employer/vendor-specific names may appear

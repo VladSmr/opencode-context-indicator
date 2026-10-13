@@ -150,7 +150,7 @@
  */
 
 import { makeV1 } from "./lib/v1.js";
-import { handleV2Event, onV2Context } from "./lib/v2.js";
+import { handleV2Event, onV2Context, estimateBreakdownFromContext, estimateBreakdownFromClientMessages } from "./lib/v2.js";
 import {
   commandContextBreakdown,
   commandContextSummary,
@@ -198,6 +198,9 @@ export {
   shortSummaryDescription,
   ensureModelLimits,
   readStateSnapshot,
+  estimateBreakdownFromContext,
+  estimateBreakdownFromClientMessages,
+  onV2Context,
 };
 
 // ---------------------------------------------------------------------------

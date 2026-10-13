@@ -565,7 +565,7 @@ export function BreakdownPanel(props: {
           </Show>
           <text fg={muted()}>
             {
-              "measured != server categories (tool outputs counted here; server categories exclude them)"
+              "measured != server categories: contributors attribute outputs per tool call; the server's toolOut category only totals them"
             }
           </text>
         </Show>

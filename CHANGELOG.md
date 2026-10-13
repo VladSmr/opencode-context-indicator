@@ -4,8 +4,22 @@ Notable user-facing changes per release. Dates are commit days (UTC).
 The package also ships a dual V1/V2 plugin — see the README for the surface
 matrix; everything below concerns the V2 path unless stated otherwise.
 
-## 1.3.1 — 2026-10-09
+## 1.4.0 — 2026-10-13
 
+Highlights: a new **toolOut** category names what used to drown in `other` —
+tool results (webfetch pages, file reads, subagent reports) are now measured
+separately instead of hiding in the residual bucket.
+
+- New category **toolOut** (tool results). `other` was the residual of every
+  uncounted input — in practice dominated by tool outputs (a webfetch-heavy
+  session showed ~300k of unexplained "other"). Results are now estimated from
+  the context payload (`text` / `json` / `error` / `content` parts) and in the
+  fallback path (persisted `state.content`); `other` shrinks to genuinely
+  uncounted input (images/media, unknown part types). Legacy `state.json`
+  entries without the field normalise to 0.
+- `/context`, `/context-breakdown`, the log and the sidebar carry the new
+  category (`out` column / line); the panel's contributors note is reworded
+  (contributors attribute outputs per tool call, `toolOut` only totals them).
 - The npm `description` and `keywords` now describe the current feature set
   (panel, cost, picker) instead of the original "log file + sidebar".
 - `/context` and `/context-breakdown` instructions are tag-delimited
@@ -17,6 +31,8 @@ matrix; everything below concerns the V2 path unless stated otherwise.
   write (deleted / abandoned sessions used to linger until the LRU cap).
   Resuming a month-old session re-derives its inherited fields once and
   self-heals on the next event.
+- Tested against opencode **2.0.28**; `@opencode/plugin` types devDep pinned
+  `2.0.28` (data-layer types unchanged; OpenTUI catalog stays `0.5.17`).
 
 ## 1.3.0 — 2026-10-09
 

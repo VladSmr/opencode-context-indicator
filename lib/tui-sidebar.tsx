@@ -54,6 +54,7 @@ export function Sidebar(props: { entry: () => StateEntry | null }) {
         <text fg={muted()}>{line("assistant", e()?.categories?.assistant)}</text>
         <text fg={muted()}>{line("reasoning", e()?.categories?.reasoning)}</text>
         <text fg={muted()}>{line("tool args", e()?.categories?.toolArgs)}</text>
+        <text fg={muted()}>{line("tool out", e()?.categories?.toolOut)}</text>
         <text fg={muted()}>
           {e()?.categories?.system == null
             ? `${"system".padEnd(LABEL_WIDTH)}     n/a`
