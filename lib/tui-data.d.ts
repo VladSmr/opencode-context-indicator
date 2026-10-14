@@ -29,6 +29,12 @@ export interface StateEntry {
   limit?: number | null
   reasoning?: number
   categories?: Categories
+  /** Per-tool tool-result split: tool name -> estimated tokens. */
+  toolOutByTool?: Record<string, number>
+  /** ISO time of the last session.compacted (marker only). */
+  compactedAt?: string | null
+  /** True while the entry still shows pre-compaction numbers. */
+  compactStale?: boolean
   updatedAt?: string
 }
 
@@ -44,3 +50,7 @@ export declare function fmt(n: number): string
 export declare function num(v: unknown): number
 export declare function fit(s: string, w: number): string
 export declare function updatedAt(iso: string | undefined): string
+export declare function toolOutEntries(
+  map: Record<string, number> | undefined,
+  limit?: number,
+): Array<[string, number]>

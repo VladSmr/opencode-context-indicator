@@ -11,7 +11,7 @@ import { mkdirSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { basename, join } from "node:path"
 import type { StateEntry } from "./tui-data.js"
-import { collectFamily, fit, fmt, num, updatedAt } from "./tui-data.js"
+import { collectFamily, fit, fmt, num, toolOutEntries, updatedAt } from "./tui-data.js"
 import { token } from "./tui-theme.js"
 import {
   buildRedactedPayload,
@@ -475,11 +475,13 @@ export function BreakdownPanel(props: {
     const model = safeText(r.model && r.model !== "unknown" ? r.model : "model?")
     const ctx = fmt(num(r.ctx))
     const d = panelDenom(r)
-    return d > 0
-      ? `Context breakdown \u2014 ${model} ${ctx}/${fmt(d)} (${Math.round(
-          (num(r.ctx) / d) * 100,
-        )}%)`
-      : `Context breakdown \u2014 ${model} ${ctx}`
+    const base =
+      d > 0
+        ? `Context breakdown \u2014 ${model} ${ctx}/${fmt(d)} (${Math.round(
+            (num(r.ctx) / d) * 100,
+          )}%)`
+        : `Context breakdown \u2014 ${model} ${ctx}`
+    return r.compactStale === true ? `${base} (stale — compacted)` : base
   }
 
   const layout = (): {
@@ -523,8 +525,25 @@ export function BreakdownPanel(props: {
       L.gutter +
       fit(money(costOf(e.sessionID)), L.costW) +
       L.gutter +
-      updatedAt(e.updatedAt)
+      updatedAt(e.updatedAt) +
+      (e.compactStale === true ? " (stale)" : "")
     )
+  }
+
+  // One compact line: the main session's tool results split by tool name
+  // (server-side aggregate; the per-call "largest contributors" block above is
+  // the measured, client-side view).
+  const byToolLine = (): string => {
+    const all = data().root?.toolOutByTool
+    const entries = toolOutEntries(all, 5)
+    if (entries.length === 0) return ""
+    const total =
+      all && typeof all === "object"
+        ? Object.values(all).filter((v) => num(v) > 0).length
+        : 0
+    const parts = entries.map(([name, val]) => `${safeText(name)} ${fmt(val)}`)
+    if (total > entries.length) parts.push(`+${total - entries.length} more`)
+    return parts.join(" \u00b7 ")
   }
 
   return (
@@ -568,6 +587,10 @@ export function BreakdownPanel(props: {
               "measured != server categories: contributors attribute outputs per tool call; the server's toolOut category only totals them"
             }
           </text>
+        </Show>
+        <Show when={byToolLine().length > 0}>
+          <text fg={base()}>{"tool results by tool"}</text>
+          <text fg={muted()}>{byToolLine()}</text>
         </Show>
       </Show>
     </box>

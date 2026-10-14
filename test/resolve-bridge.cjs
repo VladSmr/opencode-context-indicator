@@ -29,6 +29,7 @@ const checks = [
 const localChecks = [
   ["./lib/contributors.js", true],
   ["./lib/tui-data.js", true],
+  ["./lib/estimate.js", true],
   ["./lib/tui-theme.js", true],
   // Extensionless TSX imports: node's CJS resolver cannot resolve them (no
   // .tsx extension search), but the TUI host (Bun) resolves TS/TSX extensions

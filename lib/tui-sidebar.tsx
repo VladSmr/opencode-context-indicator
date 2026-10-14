@@ -66,6 +66,9 @@ export function Sidebar(props: { entry: () => StateEntry | null }) {
             : line("tool schemas", e()?.categories?.toolSchemas)}
         </text>
         <text fg={muted()}>{line("other", e()?.categories?.other)}</text>
+        <Show when={e()?.compactStale === true}>
+          <text fg={muted()}>{"  stale — compacted"}</text>
+        </Show>
         <text fg={muted()}>{`updated ${updatedAt(e()?.updatedAt)}`}</text>
       </Show>
     </box>

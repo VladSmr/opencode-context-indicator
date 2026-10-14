@@ -151,12 +151,14 @@
 
 import { makeV1 } from "./lib/v1.js";
 import { handleV2Event, onV2Context, estimateBreakdownFromContext, estimateBreakdownFromClientMessages } from "./lib/v2.js";
+import { breakdownCategories, estimateTokens, isSafeSessionKey, safeCell, safeToolOutByTool, sumCategories, toolOutEntries } from "./lib/estimate.js";
 import {
   commandContextBreakdown,
   commandContextSummary,
   CONTEXT_BREAKDOWN_RESUME,
   collectSessionReport,
   renderSessionRow,
+  renderBreakdownTable,
   shortSummaryText,
   shortSummaryDescription,
 } from "./lib/commands.js";
@@ -194,6 +196,7 @@ export {
   reserveFor,
   collectSessionReport,
   renderSessionRow,
+  renderBreakdownTable,
   shortSummaryText,
   shortSummaryDescription,
   ensureModelLimits,
@@ -201,6 +204,13 @@ export {
   estimateBreakdownFromContext,
   estimateBreakdownFromClientMessages,
   onV2Context,
+  safeToolOutByTool,
+  toolOutEntries,
+  sumCategories,
+  breakdownCategories,
+  safeCell,
+  isSafeSessionKey,
+  estimateTokens,
 };
 
 // ---------------------------------------------------------------------------

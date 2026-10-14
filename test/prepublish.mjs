@@ -887,8 +887,183 @@ check("T18c toolOut: legacy entry without the field normalises to 0", () => {
   assert(c2.other === 97, `other must stay the legacy residual, got ${c2.other}`);
 });
 
+// T19 — compaction staleness marker: a session.compacted write re-persists the
+// PRE-compaction snapshot, so the entry must be flagged stale until a fresh
+// breakdown (bd.capturedAt newer than the compaction) lands.
+const busyWait = (ms) => { const t0 = Date.now(); while (Date.now() - t0 < ms) {} };
+
+check("T19 compacted mark: stale until a fresh measurement lands", () => {
+  const ctx = (txt) => ({
+    sessionID: "ses_T19",
+    messages: [{ role: "user", content: [{ type: "text", text: txt }] }],
+    system: [],
+    tools: {},
+  });
+  // Initial fresh measurement.
+  mod.onV2Context(ctx("hello"));
+  mod.writeStateFile("ses_T19", "model-alpha", "test-provider", 500, 500, 0);
+  assert(read().ses_T19.compactStale === false, "fresh write is not stale");
+
+  // Compaction write re-persists the stale snapshot -> flagged stale.
+  busyWait(5);
+  mod.writeStateFile("ses_T19", "model-alpha", "test-provider", 500, 500, 0, { compacted: true });
+  const afterCompact = read().ses_T19;
+  assert(afterCompact.compactStale === true, "compaction write must flag stale");
+  assert(typeof afterCompact.compactedAt === "string", "compactedAt is stamped");
+
+  // A later write from an instance WITHOUT a fresh breakdown keeps the mark.
+  mod.writeStateFile("ses_T19", "model-alpha", "test-provider", 500, 500, 0);
+  assert(read().ses_T19.compactStale === true, "non-measuring write keeps the mark");
+
+  // A fresh context hook + write clears it.
+  busyWait(5);
+  mod.onV2Context(ctx("hello again"));
+  busyWait(5);
+  mod.writeStateFile("ses_T19", "model-alpha", "test-provider", 480, 480, 0);
+  assert(read().ses_T19.compactStale === false, "fresh measurement clears the mark");
+});
+
+check("T19b compacted mark: stale even without a live breakdown (cross-instance)", () => {
+  // A mirror instance with NO bd still re-persists pre-compaction numbers on
+  // session.compacted — it must flag stale unconditionally (not fall back to a
+  // missing prev verdict). ses_T19B never measured, so its bd is undefined.
+  mod.writeStateFile("ses_T19B", "model-alpha", "test-provider", 300, 300, 0, { compacted: true });
+  assert(read().ses_T19B.compactStale === true, "compaction write flags stale with no bd");
+  // A later non-measuring write (still no bd) keeps the inherited mark.
+  mod.writeStateFile("ses_T19B", "model-alpha", "test-provider", 300, 300, 0);
+  assert(read().ses_T19B.compactStale === true, "no-bd non-measuring write keeps the mark");
+});
+
+check("T19a stale surface: summary + table row show the marker", () => {
+  const report = {
+    sessionID: "ses_T19", modelID: "model-alpha", providerID: "test-provider",
+    ctxTokens: 480, usable: 180000, reserve: 18000,
+    categories: { user: 1, assistant: 1, reasoning: 0, toolArgs: 0, toolOut: 0, system: 1, toolSchemas: 1, other: 0 },
+    toolOutByTool: null, compactStale: true, source: "snapshot",
+    updatedAt: new Date().toISOString(),
+  };
+  assert(mod.shortSummaryText(report).includes("stale — compacted"), "summary carries the marker");
+  assert(mod.renderSessionRow(report, true).includes("(stale)"), "table row carries the marker");
+  const clean = { ...report, compactStale: false };
+  assert(!mod.shortSummaryText(clean).includes("stale"), "clean summary has no marker");
+});
+
+check("T20 toolOutByTool: hook estimator splits results per tool", () => {
+  const parts = mod.estimateBreakdownFromContext({
+    sessionID: "ses_T20",
+    messages: [
+      { role: "user", content: [
+        { type: "tool-result", name: "webfetch", result: { type: "text", value: "w".repeat(40) } },
+        { type: "tool-result", name: "read", result: { type: "text", value: "r".repeat(20) } },
+        { type: "tool-result", name: "webfetch", result: { type: "text", value: "x".repeat(40) } },
+      ]},
+    ],
+    system: [],
+    tools: {},
+  }, "ses_T20");
+  assert(parts.toolOutChars === 25, `total toolOut 25, got ${parts.toolOutChars}`);
+  assert(parts.toolOutByTool.webfetch === 20, `webfetch aggregates 20, got ${parts.toolOutByTool.webfetch}`);
+  assert(parts.toolOutByTool.read === 5, `read 5, got ${parts.toolOutByTool.read}`);
+});
+
+check("T20a toolOutByTool: fallback splits persisted tool parts by name", () => {
+  const parts = mod.estimateBreakdownFromClientMessages([
+    { type: "assistant", content: [
+      { type: "tool", name: "bash", state: { status: "completed", input: { cmd: "x" }, content: [{ type: "text", text: "o".repeat(40) }] } },
+    ]},
+  ]);
+  assert(parts.toolOutByTool.bash === 10, `bash 40 chars -> 10 tokens, got ${parts.toolOutByTool.bash}`);
+});
+
+check("T20b toolOutByTool: sanitised + bounded (proto dropped, overflow bucketed)", () => {
+  const dirty = JSON.parse('{"__proto__":5,"webfetch":10,"constructor":7,"read":4}');
+  const cleanMap = mod.safeToolOutByTool(dirty);
+  assert(cleanMap && cleanMap.webfetch === 10 && cleanMap.read === 4, "safe names kept");
+  assert(!Object.prototype.hasOwnProperty.call(cleanMap, "__proto__"), "proto key dropped from own keys");
+  assert(cleanMap["other tools"] === 12, `unsafe names folded into other tools, got ${cleanMap["other tools"]}`);
+  // Bounding: 30 distinct safe names -> 24 kept + "other tools".
+  const many = {};
+  for (let i = 0; i < 30; i++) many[`t${i}`] = 1;
+  const bounded = mod.safeToolOutByTool(many);
+  assert(Object.keys(bounded).length === 25, `24 + overflow bucket, got ${Object.keys(bounded).length}`);
+  assert(bounded["other tools"] === 6, "overflow summed into the bucket");
+});
+
+check("T20c toolOutByTool: persisted end-to-end and rendered in the breakdown", () => {
+  mod.onV2Context({
+    sessionID: "ses_T20C",
+    messages: [{ role: "user", content: [
+      { type: "tool-result", name: "webfetch", result: { type: "text", value: "w".repeat(400) } },
+      { type: "tool-result", name: "read", result: { type: "text", value: "r".repeat(40) } },
+    ]}],
+    system: [],
+    tools: {},
+  });
+  mod.writeStateFile("ses_T20C", "model-alpha", "test-provider", 1000, 1000, 0);
+  const e = read().ses_T20C;
+  assert(e.toolOutByTool && e.toolOutByTool.webfetch === 100, `webfetch 100 persisted, got ${e.toolOutByTool?.webfetch}`);
+  assert(e.toolOutByTool.read === 10, "read 10 persisted");
+  const row = mod.renderSessionRow({ sessionID: "ses_T20C", modelID: "model-alpha", ctxTokens: 1000, usable: 180000, categories: e.categories, toolOutByTool: e.toolOutByTool, source: "snapshot", updatedAt: e.updatedAt }, true);
+  const table = mod.renderBreakdownTable([row], 0, { toolOutByTool: e.toolOutByTool });
+  assert(table.includes("Tool results by tool (main)"), "by-tool section present");
+  assert(table.includes("webfetch 100"), `by-tool line lists webfetch 100: ${table.split("\n").slice(-1)[0]}`);
+});
+
+check("T21 shared category helpers: sum + residual (both record shapes)", () => {
+  // nulls (hook-only system/schemas) count as 0; non-objects -> 0.
+  assert(
+    mod.sumCategories({ user: 10, assistant: 5, system: null, toolSchemas: null, other: 2 }) === 17,
+    "sumCategories skips nulls",
+  );
+  assert(mod.sumCategories(null) === 0 && mod.sumCategories("x") === 0, "sumCategories(non-object) -> 0");
+  // *Chars (cache record) and canonical (state entry) shapes normalise identically.
+  const fromChars = mod.breakdownCategories(
+    { userChars: 100, assistantChars: 40, toolOutChars: 10, systemChars: null },
+    500,
+  );
+  const fromCanon = mod.breakdownCategories(
+    { user: 100, assistant: 40, toolOut: 10, system: null },
+    500,
+  );
+  assert(JSON.stringify(fromChars) === JSON.stringify(fromCanon), "both record shapes normalise identically");
+  assert(fromChars.other === 350, `residual = 500 - 150, got ${fromChars.other}`);
+  assert(mod.breakdownCategories({ user: 999 }, 10).other === 0, "residual clamps at 0");
+});
+
+check("T22 sanitizers + unicode densities (safeCell / isSafeSessionKey / estimateTokens)", () => {
+  // safeCell: pipes escaped, backtick neutralised, controls/zero-width collapsed.
+  assert(mod.safeCell("a|b") === "a\\|b", `pipe escaped, got ${JSON.stringify(mod.safeCell("a|b"))}`);
+  assert(mod.safeCell("a\\b") === "a\\\\b", "backslash doubled");
+  assert(mod.safeCell("x`y") === "x'y", "backtick neutralised");
+  assert(!/[\u0000-\u001f]/.test(mod.safeCell("a\tb\nc")), "controls collapsed");
+  assert(mod.safeCell("\u200bhi") === "hi", "zero-width dropped");
+  // Truncation is code-point safe and happens BEFORE escaping: 200 source
+  // codepoints -> 63 retained + ellipsis = exactly 64 (no escapes here).
+  const capped = mod.safeCell("z".repeat(200));
+  assert(capped.length === 64 && capped.endsWith("\u2026"), `cap = 64 chars + ellipsis, got ${capped.length}`);
+  // Escape ORDER: `\` first, then `|` — a crafted `a\|b` must not leave a live pipe.
+  assert(
+    mod.safeCell("a\\|b") === "a" + "\\".repeat(3) + "|" + "b",
+    `backslash escaped before pipe, got ${JSON.stringify(mod.safeCell("a\\|b"))}`,
+  );
+  // isSafeSessionKey: prototype vectors rejected, normal ids accepted.
+  assert(
+    !mod.isSafeSessionKey("__proto__") &&
+      !mod.isSafeSessionKey("constructor") &&
+      !mod.isSafeSessionKey("prototype"),
+    "prototype vectors rejected",
+  );
+  assert(!mod.isSafeSessionKey("") && !mod.isSafeSessionKey(42), "empty/non-string rejected");
+  assert(mod.isSafeSessionKey("ses_abc"), "normal id accepted");
+  // estimateTokens densities: latin /4, cyrillic /2.5, CJK /1.5.
+  assert(mod.estimateTokens("a".repeat(40)) === 10, "latin 40 -> 10");
+  assert(mod.estimateTokens("\u0430".repeat(25)) === 10, "cyrillic 25 -> 10");
+  assert(mod.estimateTokens("\u4e2d".repeat(15)) === 10, "CJK 15 -> 10");
+  assert(mod.estimateTokens("") === 0 && mod.estimateTokens(null) === 0, "empty/null -> 0");
+});
+
 if (failed) fatal(`${failed} unit test(s) failed`);
-pass(`all ${ranChecks} unit checks passed (T1–T12 + T13–T18)`);
+pass(`all ${ranChecks} unit checks passed (T1–T12 + T13–T22)`);
 
 // ---------------------------------------------------------------------------
 // (e) corporate-identifier scan — no employer/vendor-specific names may appear
@@ -901,7 +1076,7 @@ const FORBIDDEN = new RegExp(
   ["la" + "nit", "d" + "ks", "deep" + "seek"].join("|"),
   "i",
 );
-const scanFiles = ["index.js", "tui.tsx", "README.md", "package.json"];
+const scanFiles = ["index.js", "tui.tsx", "README.md", "package.json", "CHANGELOG.md"];
 for (const dir of ["lib", "test"]) {
   const abs = join(repoRoot, dir);
   if (!existsSync(abs)) continue;

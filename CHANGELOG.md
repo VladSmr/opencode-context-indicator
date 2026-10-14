@@ -4,6 +4,33 @@ Notable user-facing changes per release. Dates are commit days (UTC).
 The package also ships a dual V1/V2 plugin — see the README for the surface
 matrix; everything below concerns the V2 path unless stated otherwise.
 
+## 1.4.1 — 2026-10-14
+
+Highlights: the `toolOut` category is now split **by tool name**, and a
+`(stale — compacted)` marker tells you when the numbers predate a compaction.
+
+- **Tool results by tool**: `/context-breakdown` (a `### Tool results by tool
+  (main)` section) and the `./cx` panel (`tool results by tool` line) split the
+  `toolOut` column by tool name (`webfetch`, `read`, `bash`, …) — top-N with a
+  `+N more` tail. Aggregated on both the hook and the fallback path from each
+  tool part's `name`; names are sanitised and the map is bounded (overflow folds
+  into `other tools`). Persisted as `toolOutByTool` in `state.json`.
+- **Compaction staleness marker**: opencode's compaction fires no `context`
+  hook, so `/context` right after `/compact` used to show stale pre-compaction
+  numbers with no hint. Such an entry is now flagged (`compactStale`) and every
+  surface (sidebar, panel, `/context`, `/context-breakdown`) shows
+  `(stale — compacted)` until the next model request refreshes the breakdown.
+- Legacy `state.json` entries (no new fields) behave exactly as before.
+- Tests: T19/T19a (staleness mark lifecycle + surfaces), T20–T20c (per-tool
+  split on both paths, sanitisation/bounding, persistence + rendering).
+- **Refactor (behaviour-preserving)**: extracted the shared category helpers
+  (`sumCategories` / `breakdownCategories`) into `lib/estimate.js`, removing
+  four hand-rolled copies of the residual-`other` computation (V2 live log,
+  state writer, command report, TUI panel); the TUI now imports the ONE token
+  estimator and per-tool split from `lib/estimate.js` instead of keeping byte
+  copies; dropped unused module exports; unified the per-tool map cap. New
+  guard test T21.
+
 ## 1.4.0 — 2026-10-13
 
 Highlights: a new **toolOut** category names what used to drown in `other` —

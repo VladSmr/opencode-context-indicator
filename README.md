@@ -49,9 +49,10 @@ For every served request the plugin estimates how the context window is split:
 * `other` is the residual (`input − sum of estimates`): what no category
   explains — images/media, unknown part types.
 * `toolOut` names the former blind spot: **tool results** fed back into the
-  context (webfetch pages, file reads, subagent reports). The TUI panel's
-  *largest contributors* section attributes them **per tool call**; the
-  category only totals them.
+  context (webfetch pages, file reads, subagent reports). `/context-breakdown`
+  and the TUI panel split it **by tool name** (`webfetch`, `read`, `bash`, …);
+  the TUI panel's *largest contributors* section attributes them **per tool
+  call**; the category only totals them.
 * `ctx` is OpenCode's native overflow count: `tokens.total` when present, else
   `input + output + cache.read + cache.write`. Percentages are **not clamped**
   at 100% — exceeding the window stays visible.
@@ -160,6 +161,9 @@ reads, subagent reports fed back into context), sys=system prompt, schm=tool
 schemas, oth=residual input. src: live=context hook, snap=state.json,
 fallback=session.context (no system/schemas → n/a), no-data=categories
 unavailable._
+
+### Tool results by tool (main)
+webfetch 242.1k · read 18.4k · bash 4.9k · +3 more
 ```
 
 It is delivered with `resume:true` **and** a verbatim instruction prefix, so the
@@ -524,6 +528,13 @@ duplicate final summaries are suppressed with an atomic claim marker
 (`lib/dedup.js`). Every file / estimate / subagent path is fault-tolerant: a
 failure is logged and never breaks the main event or toast path.
 
+**Compaction staleness.** OpenCode's compaction runs a separate flow that fires
+no `context` hook, so the numbers a `session.compacted` write re-persists are
+the *pre-compaction* ones. The plugin flags such an entry
+(`compactStale` in `state.json`) and every surface shows `(stale — compacted)`
+until the next model request refreshes the breakdown — i.e. the data is exactly
+as fresh as the last model request in the session.
+
 This plugin does not touch `opencode-token-monitor`
 (`token_stats` / `token_history` / `token_export` keep working unchanged).
 
@@ -542,7 +553,7 @@ caller.
 ### Running tests
 
 ```bash
-npm run test:prepublish       # fast gate: tarball + tui.tsx + resolve + T1–T16i unit checks
+npm run test:prepublish       # fast gate: tarball + tui.tsx + resolve + T1–T22 unit checks
 npm run test:e2e              # full E2E: isolated plugin load + one "Say OK" round-trip
 npm run test:e2e:quick        # E2E load-only, no LLM call
 npm run test:drift            # OpenTUI pin vs the latest RELEASED opencode (also in CI)
@@ -563,7 +574,7 @@ STEP 80 s, ~3 min total.
 | (a) tarball composition | `package.json` `files[]` expands to the base files plus every `lib/*` module (count asserted dynamically) | no test/node_modules/tsconfig in the tarball |
 | (b) pragma regression | esbuild `--jsx=automatic` → `@opentui/solid/jsx-runtime` present, `react/jsx-runtime` absent | a removed/broken pragma kills the sidebar on npm install |
 | (c) resolve chain | replica install: host-bridged + peer packages resolve; local tui.tsx relative imports resolve via node from the entry (resolve-bridge.cjs) | broken peer/optional dep or a bad local import silently breaks the sidebar |
-| (d) unit harness T1–T16i | limit/agent/state fix assertions plus measureContributors and redacted-export checks (34 total) | regressions in modelLimits, writeStateFile, hydrate, contributors, export |
+| (d) unit harness T1–T22 | limit/agent/state fix assertions plus measureContributors, redacted-export, shared category-helper and sanitizer/unicode checks (51 total) | regressions in modelLimits, writeStateFile, hydrate, contributors, export |
 | (e) corporate-identifier scan | no forbidden identifiers in the published surface + test tree | compliance |
 | (f) non-English scan | no non-ASCII letters (`\p{L}` above U+007F) in any repo file | English-only source rule |
 
