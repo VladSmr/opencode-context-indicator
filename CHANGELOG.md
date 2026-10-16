@@ -4,6 +4,34 @@ Notable user-facing changes per release. Dates are commit days (UTC).
 The package also ships a dual V1/V2 plugin — see the README for the surface
 matrix; everything below concerns the V2 path unless stated otherwise.
 
+## 1.5.0 — 2026-10-16
+
+Highlights: two new context-health signals — the **provider-reported prompt
+cache** (exact) and a **waste detector** for redundant tool output already in
+the context.
+
+- **Prompt cache (provider-reported)**: `session.step.ended` carries
+  `tokens.cache.{read,write}` — the provider's EXACT prompt-cache figures. Shown
+  as `prompt cache read=X (Y% of input) · write=Z` in `/context-breakdown`
+  (a `### Prompt cache` section), `/context`, the `./cx` panel and the live log.
+  It is a **subset of `input`**, so it is deliberately **not** added to the
+  category sum (no double-count). `n/a` when the provider reports nothing;
+  persisted as `cacheRead`/`cacheWrite` and inherited by mirror writes (a
+  non-measuring write cannot drop them).
+- **Waste detector**: finds tool output already in the context that is redundant
+  — the **same target** invoked repeatedly (the same file read twice, the same
+  URL fetched again) or **byte-identical output**. Reported as a `### Potential
+  reclaim (redundant tool output)` section in `/context-breakdown` (top findings
+  with tool + target) plus a `reclaim ~X redundant tool output (N dup)` panel/log
+  line. The number is the non-largest member of each duplicate group — an honest
+  *"N copies are in context; trimming/compaction could reclaim ~X"*, never "the
+  model wasted effort". Findings are **path-free** in the persisted/exported
+  form; the estimate is computed on both the hook and the fallback path.
+- Tests: T23/T23a/T23b (cache persistence, surfaces, sanitisation), T24–T24c
+  (reclaim algorithm, target extraction, hook capture via call-id correlation,
+  path-free persistence + rendering).
+- Legacy `state.json` entries (without the new fields) behave exactly as before.
+
 ## 1.4.1 — 2026-10-14
 
 Highlights: the `toolOut` category is now split **by tool name**, and a

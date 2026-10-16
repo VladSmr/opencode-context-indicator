@@ -570,6 +570,29 @@ export function BreakdownPanel(props: {
                 : "")}
           </text>
         </Show>
+        <Show
+          when={
+            num(data().root?.cacheRead) > 0 ||
+            num(data().root?.cacheWrite) > 0
+          }
+        >
+          <text fg={muted()}>
+            {"  prompt cache r " +
+              fmt(num(data().root?.cacheRead)) +
+              " / w " +
+              fmt(num(data().root?.cacheWrite)) +
+              " (provider-reported)"}
+          </text>
+        </Show>
+        <Show when={num(data().root?.reclaim?.tokens) > 0}>
+          <text fg={muted()}>
+            {"  reclaim ~" +
+              fmt(num(data().root?.reclaim?.tokens)) +
+              " redundant tool output (" +
+              num(data().root?.reclaim?.count) +
+              " dup)"}
+          </text>
+        </Show>
         <Show when={messages().available}>
           <text fg={base()}>{"largest contributors (measured)"}</text>
           <Show

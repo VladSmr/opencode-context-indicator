@@ -1,6 +1,6 @@
 {
   "name": "opencode-context-indicator",
-  "version": "1.4.1",
+  "version": "1.5.0",
   "description": "Real-time context-window usage for OpenCode: per-category token breakdown, a zero-LLM /cx panel with per-session cost and a searchable family-session picker, and a TUI sidebar. Dual V1 + V2 plugin entry.",
   "type": "module",
   "license": "MIT",
@@ -64,7 +64,7 @@
     "@opentui/solid": "0.5.17"
   },
   "devDependencies": {
-    "@opencode/plugin": "2.0.29",
+    "@opencode/plugin": "2.0.30",
     "@opentui/core": "0.5.17",
     "@types/node": "26.6.3",
     "esbuild": "^0.28.2",

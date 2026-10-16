@@ -31,6 +31,20 @@ export interface StateEntry {
   categories?: Categories
   /** Per-tool tool-result split: tool name -> estimated tokens. */
   toolOutByTool?: Record<string, number>
+  /** Provider-reported prompt-cache tokens (exact; a subset of input). */
+  cacheRead?: number | null
+  cacheWrite?: number | null
+  /** Redundant tool output (waste detector). Findings here are path-free. */
+  reclaim?: {
+    tokens: number
+    count: number
+    findings?: Array<{
+      kind?: string
+      name?: string
+      n?: number
+      tokens?: number
+    }>
+  } | null
   /** ISO time of the last session.compacted (marker only). */
   compactedAt?: string | null
   /** True while the entry still shows pre-compaction numbers. */

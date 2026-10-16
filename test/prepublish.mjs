@@ -1062,8 +1062,133 @@ check("T22 sanitizers + unicode densities (safeCell / isSafeSessionKey / estimat
   assert(mod.estimateTokens("") === 0 && mod.estimateTokens(null) === 0, "empty/null -> 0");
 });
 
+// T23 — provider-reported prompt cache (EXACT; a subset of input, never a
+// category, inherited by mirror writes so a non-measuring write cannot drop it).
+check("T23 prompt cache: persisted, inherited, never a category", () => {
+  mod.writeStateFile("ses_T23", "model-alpha", "test-provider", 1000, 1000, 0, { cacheRead: 600, cacheWrite: 200 });
+  const e = read().ses_T23;
+  assert(e.cacheRead === 600 && e.cacheWrite === 200, `cache persisted, got ${e.cacheRead}/${e.cacheWrite}`);
+  // A later mirror write without fresh figures must NOT drop them.
+  mod.writeStateFile("ses_T23", "model-alpha", "test-provider", 1000, 1000, 0);
+  assert(read().ses_T23.cacheRead === 600, "cache inherited by a non-measuring write");
+  // A session that never reported cache stays null (not a misleading 0).
+  mod.writeStateFile("ses_T23N", "model-alpha", "test-provider", 100, 100, 0);
+  assert(read().ses_T23N.cacheRead === null && read().ses_T23N.cacheWrite === null, "absent cache -> null");
+  // Cache is a SUBSET of input: it must not enter the category sum.
+  const c = read().ses_T23.categories;
+  const sum = c.user + c.assistant + c.reasoning + c.toolArgs + (c.toolOut || 0) + (c.system || 0) + (c.toolSchemas || 0) + c.other;
+  assert(sum === read().ses_T23.input, `cache must not enter the category sum (${sum})`);
+});
+
+const repT23 = await mod.collectSessionReport(mockCtx, "ses_T23", read(), Date.now() + 2000);
+check("T23a prompt cache: surfaced in the report / table / summary", () => {
+  assert(mod.lastKnownCacheRead("ses_none") === null, "accessor -> null when unknown");
+  assert(repT23.cacheRead === 600 && repT23.cacheWrite === 200, `report carries cache, got ${repT23.cacheRead}/${repT23.cacheWrite}`);
+  const table = mod.renderBreakdownTable([], 0, repT23);
+  assert(table.includes("Prompt cache"), "table has a prompt-cache section");
+  assert(table.includes("read 600"), `table shows read 600: ${table}`);
+  assert(mod.shortSummaryText(repT23).includes("prompt cache"), "summary shows the cache line");
+});
+
+check("T23b prompt cache: non-finite / absurd provider values are dropped", () => {
+  assert(mod.safeSaneOrNull(600) === 600 && mod.safeSaneOrNull(0) === 0, "valid kept");
+  assert(
+    mod.safeSaneOrNull(NaN) === null && mod.safeSaneOrNull(-1) === null && mod.safeSaneOrNull(1e15) === null,
+    "NaN/negative/absurd -> null",
+  );
+  mod.writeStateFile("ses_T23S", "model-alpha", "test-provider", 100, 100, 0, { cacheRead: NaN, cacheWrite: -5 });
+  assert(read().ses_T23S.cacheRead === null && read().ses_T23S.cacheWrite === null, "poisoned cache -> null");
+});
+
+// T24 — waste detector: redundant tool output already in context (repeated
+// target / identical output). Persisted PATH-FREE; surfaced in the breakdown.
+check("T24 computeReclaim: repeated target / identical content / union", () => {
+  const byTarget = mod.computeReclaim([
+    { name: "read", target: "a.ts", tokens: 100, fp: "p1" },
+    { name: "read", target: "a.ts", tokens: 40, fp: "p2" },
+  ]);
+  assert(byTarget.tokens === 40 && byTarget.count === 1, `keep largest, reclaim the rest: ${JSON.stringify(byTarget)}`);
+  const byContent = mod.computeReclaim([
+    { name: "bash", target: "cmd1", tokens: 50, fp: "same" },
+    { name: "bash", target: "cmd2", tokens: 30, fp: "same" },
+  ]);
+  assert(byContent.tokens === 30 && byContent.count === 1, `identical output detected: ${JSON.stringify(byContent)}`);
+  const union = mod.computeReclaim([
+    { name: "read", target: "a.ts", tokens: 100, fp: "same" },
+    { name: "read", target: "a.ts", tokens: 60, fp: "same" },
+    { name: "read", target: "a.ts", tokens: 20, fp: "same" },
+  ]);
+  assert(union.tokens === 80 && union.count === 2, `union not double-counted: ${JSON.stringify(union)}`);
+  assert(
+    union.findings.reduce((a, f) => a + f.tokens, 0) === union.tokens,
+    `findings must never sum above the total: ${JSON.stringify(union.findings)}`,
+  );
+  assert(mod.computeReclaim([{ name: "read", target: "a.ts", tokens: 10, fp: "x" }]).tokens === 0, "single instance -> 0");
+  assert(mod.computeReclaim(null).tokens === 0, "null-safe");
+});
+
+check("T24a extractToolTarget + contentFingerprint", () => {
+  assert(mod.extractToolTarget("read", { filePath: "src/a.ts" }) === "src/a.ts", "read filePath");
+  assert(mod.extractToolTarget("webfetch", { url: "https://x/y" }) === "https://x/y", "webfetch url");
+  assert(mod.extractToolTarget("bash", { command: "ls   -la" }) === "ls -la", "bash command collapsed");
+  assert(mod.extractToolTarget("mystery", { foo: "first", bar: "second" }) === "first", "generic first string");
+  assert(mod.extractToolTarget("read", null) === null && mod.extractToolTarget("read", {}) === null, "non-object/empty -> null");
+  assert(mod.contentFingerprint("x".repeat(400)) === mod.contentFingerprint("x".repeat(400)), "same content -> same fp");
+  assert(mod.contentFingerprint("a") !== mod.contentFingerprint("b"), "different content -> different fp");
+  assert(mod.contentFingerprint("") === "", "empty -> empty fp");
+});
+
+check("T24b hook estimator: repeated tool result via call-id correlation", () => {
+  const parts = mod.estimateBreakdownFromContext({
+    sessionID: "ses_T24",
+    messages: [
+      { role: "assistant", content: [{ type: "tool-call", id: "c1", name: "read", input: { filePath: "a.ts" } }] },
+      { role: "user", content: [{ type: "tool-result", id: "c1", name: "read", result: { type: "text", value: "r".repeat(400) } }] },
+      { role: "assistant", content: [{ type: "tool-call", id: "c2", name: "read", input: { filePath: "a.ts" } }] },
+      { role: "user", content: [{ type: "tool-result", id: "c2", name: "read", result: { type: "text", value: "r".repeat(400) } }] },
+    ],
+    system: [],
+    tools: {},
+  }, "ses_T24");
+  // 400 latin chars -> 100 tokens each; identical target+content -> reclaim 100.
+  assert(parts.toolOutChars === 200, `toolOut total 200, got ${parts.toolOutChars}`);
+  assert(parts.reclaim && parts.reclaim.tokens === 100 && parts.reclaim.count === 1, `reclaim 100/1, got ${JSON.stringify(parts.reclaim)}`);
+});
+
+check("T24c waste persisted path-free + rendered", () => {
+  mod.onV2Context({
+    sessionID: "ses_T24C",
+    messages: [
+      { role: "assistant", content: [{ type: "tool-call", id: "c1", name: "read", input: { filePath: "secret/path.ts" } }] },
+      { role: "user", content: [{ type: "tool-result", id: "c1", name: "read", result: { type: "text", value: "r".repeat(400) } }] },
+      { role: "assistant", content: [{ type: "tool-call", id: "c2", name: "read", input: { filePath: "secret/path.ts" } }] },
+      { role: "user", content: [{ type: "tool-result", id: "c2", name: "read", result: { type: "text", value: "r".repeat(400) } }] },
+    ],
+    system: [],
+    tools: {},
+  });
+  mod.writeStateFile("ses_T24C", "model-alpha", "test-provider", 1000, 1000, 0);
+  const e = read().ses_T24C;
+  assert(e.reclaim && e.reclaim.tokens === 100, `reclaim persisted, got ${JSON.stringify(e.reclaim)}`);
+  const findings = e.reclaim.findings || [];
+  assert(findings.length >= 1, "at least one finding");
+  for (const f of findings) {
+    assert(!Object.prototype.hasOwnProperty.call(f, "target"), "persisted findings are path-free (no target)");
+  }
+  const rep = {
+    sessionID: "ses_T24C", modelID: "model-alpha", providerID: "test-provider",
+    ctxTokens: 1000, inputTokens: 1000, usable: 180000, reserve: 18000,
+    categories: e.categories, toolOutByTool: e.toolOutByTool, reclaim: e.reclaim,
+    cacheRead: null, cacheWrite: null, compactStale: false, source: "snapshot",
+    updatedAt: e.updatedAt,
+  };
+  const table = mod.renderBreakdownTable([], 0, rep);
+  assert(table.includes("Potential reclaim"), "table has a reclaim section");
+  assert(table.includes("read x2"), `reclaim line lists read x2: ${table}`);
+});
+
 if (failed) fatal(`${failed} unit test(s) failed`);
-pass(`all ${ranChecks} unit checks passed (T1–T12 + T13–T22)`);
+pass(`all ${ranChecks} unit checks passed (T1–T12 + T13–T24)`);
 
 // ---------------------------------------------------------------------------
 // (e) corporate-identifier scan — no employer/vendor-specific names may appear

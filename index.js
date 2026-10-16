@@ -151,7 +151,7 @@
 
 import { makeV1 } from "./lib/v1.js";
 import { handleV2Event, onV2Context, estimateBreakdownFromContext, estimateBreakdownFromClientMessages } from "./lib/v2.js";
-import { breakdownCategories, estimateTokens, isSafeSessionKey, safeCell, safeToolOutByTool, sumCategories, toolOutEntries } from "./lib/estimate.js";
+import { breakdownCategories, computeReclaim, contentFingerprint, estimateTokens, extractToolTarget, isSafeSessionKey, safeCell, safeReclaim, safeSaneOrNull, safeToolOutByTool, sumCategories, toolOutEntries } from "./lib/estimate.js";
 import {
   commandContextBreakdown,
   commandContextSummary,
@@ -170,7 +170,7 @@ import {
   modelLimits,
   reserveFor,
 } from "./lib/limits.js";
-import { sessionAgentCache, sessionParentCache } from "./lib/cache.js";
+import { lastKnownCacheRead, lastKnownCacheWrite, sessionAgentCache, sessionParentCache } from "./lib/cache.js";
 import {
   logErr,
   readStateSnapshot,
@@ -211,6 +211,13 @@ export {
   safeCell,
   isSafeSessionKey,
   estimateTokens,
+  extractToolTarget,
+  contentFingerprint,
+  computeReclaim,
+  safeReclaim,
+  safeSaneOrNull,
+  lastKnownCacheRead,
+  lastKnownCacheWrite,
 };
 
 // ---------------------------------------------------------------------------
