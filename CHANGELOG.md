@@ -4,6 +4,20 @@ Notable user-facing changes per release. Dates are commit days (UTC).
 The package also ships a dual V1/V2 plugin — see the README for the surface
 matrix; everything below concerns the V2 path unless stated otherwise.
 
+## 1.5.1 — 2026-10-19
+
+- **Compaction now handled by the real `compaction` hook.** opencode dispatches
+  a `compaction` hook at the start of a compaction request with the same
+  pre-compaction payload as the `context` hook. The plugin registers it and
+  persists the *true* pre-compaction breakdown at that moment — previously the
+  trailing `session.compacted` event re-persisted whatever the last model
+  request had left behind. The event is kept as a fallback (hosts/paths where
+  the hook does not fire), and a no-op compaction ("Nothing to compact yet")
+  writes no stale entry. Same `(stale — compacted)` UX, more accurate numbers.
+- Dev: pinned the `@opencode/plugin` devDependency to `2.0.32`.
+- Tests: T25 / T25a / T25b / T25c (compaction-hook snapshot, no-op guard,
+  event fallback, cold-cache clobber guard) — 62 unit checks total.
+
 ## 1.5.0 — 2026-10-16
 
 Highlights: two new context-health signals — the **provider-reported prompt

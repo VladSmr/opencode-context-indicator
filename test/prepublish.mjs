@@ -1187,8 +1187,110 @@ check("T24c waste persisted path-free + rendered", () => {
   assert(table.includes("read x2"), `reclaim line lists read x2: ${table}`);
 });
 
+// T25 — compaction HOOK: the EXACT pre-compaction snapshot is persisted (and
+// flagged stale) the moment opencode dispatches the compaction request, instead
+// of relying on the trailing session.compacted event to re-persist whatever a
+// previous request left behind.
+const t25Err = quietErr(() => {
+  mod.lastKnownCtxCache.set("ses_T25", 8000);
+  mod.lastKnownInputCache.set("ses_T25", 8000);
+  mod.lastKnownReasoningCache.set("ses_T25", 0);
+  // A prior (smaller) context-hook measurement must NOT win over the hook.
+  mod.onV2Context({
+    sessionID: "ses_T25",
+    messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+    system: [],
+    tools: {},
+  });
+  mod.writeStateFile("ses_T25", "model-alpha", "test-provider", 8000, 8000, 0);
+  // The compaction request carries the FULL pre-compaction history.
+  mod.onV2Compaction({
+    sessionID: "ses_T25",
+    messages: [
+      { role: "user", content: [{ type: "text", text: "u".repeat(400) }] },
+      { role: "assistant", content: [{ type: "text", text: "a".repeat(400) }] },
+    ],
+    system: [],
+    tools: {},
+    model: { id: "model-alpha", providerID: "test-provider" },
+  });
+});
+const t25 = read().ses_T25;
+check("T25 compaction hook: exact pre-compaction snapshot + stale mark", () => {
+  assert(t25Err.length === 0, `no errors: ${t25Err.join(" | ")}`);
+  // 400 latin chars -> 100 tokens each; the hook payload owns the snapshot.
+  assert(t25.categories.user === 100 && t25.categories.assistant === 100, `hook payload owns the snapshot: ${JSON.stringify(t25.categories)}`);
+  assert(t25.compactStale === true, "compaction hook flags the entry stale");
+  assert(typeof t25.compactedAt === "string", "compactedAt is stamped by the hook");
+});
+
+// T25a — a NO-OP compaction ("Nothing to compact yet", no measured context) must
+// not fake a stale badge.
+const t25aErr = quietErr(() => {
+  mod.lastKnownCtxCache.delete("ses_T25N");
+  mod.onV2Compaction({
+    sessionID: "ses_T25N",
+    messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+    system: [],
+    tools: {},
+  });
+});
+check("T25a compaction hook: no-op (no measured context) writes no stale entry", () => {
+  assert(t25aErr.length === 0, `no errors: ${t25aErr.join(" | ")}`);
+  assert(!read().ses_T25N, "no state entry written for a no-op compaction");
+});
+
+// T25b — the session.compacted event is a FALLBACK: skipped when the hook
+// already handled the write, and still marks stale when it did not.
+mod.lastKnownCtxCache.set("ses_T25C", 5000);
+mod.lastKnownInputCache.set("ses_T25C", 5000);
+mod.writeStateFile("ses_T25C", "model-alpha", "test-provider", 5000, 5000, 0);
+mod.onV2Compaction({
+  sessionID: "ses_T25C",
+  messages: [
+    { role: "user", content: [{ type: "text", text: "u".repeat(40) }] },
+    { role: "assistant", content: [{ type: "text", text: "a".repeat(40) }] },
+  ],
+  system: [], tools: {}, model: { id: "model-alpha", providerID: "test-provider" },
+});
+const afterHookAt25 = read().ses_T25C.updatedAt;
+busyWait(5);
+await mod.handleV2Event(mockCtx, { type: "session.compacted", id: "evt25c", data: { sessionID: "ses_T25C" } });
+const skipped25 = read().ses_T25C.updatedAt === afterHookAt25;
+mod.lastKnownCtxCache.set("ses_T25D", 5000);
+mod.lastKnownInputCache.set("ses_T25D", 5000);
+mod.writeStateFile("ses_T25D", "model-alpha", "test-provider", 5000, 5000, 0);
+const beforeEvent25 = read().ses_T25D.updatedAt;
+busyWait(5);
+await mod.handleV2Event(mockCtx, { type: "session.compacted", id: "evt25d", data: { sessionID: "ses_T25D" } });
+const fallback25 = read().ses_T25D;
+check("T25b session.compacted event: skipped after the hook, fallback otherwise", () => {
+  assert(skipped25, "event did not rewrite the entry the hook just handled");
+  assert(fallback25.compactStale === true && fallback25.updatedAt !== beforeEvent25, "event fallback writes + flags stale");
+});
+
+// T25c — the guard also protects a HEALTHY entry: a hook firing with a COLD
+// last-known cache (mirror instance / just after idle) must not zero ctx.
+mod.writeStateFile("ses_T25E", "model-alpha", "test-provider", 5000, 5000, 0);
+mod.lastKnownCtxCache.delete("ses_T25E");
+mod.lastKnownInputCache.delete("ses_T25E");
+const t25cErr = quietErr(() => mod.onV2Compaction({
+  sessionID: "ses_T25E",
+  messages: [
+    { role: "user", content: [{ type: "text", text: "u".repeat(40) }] },
+    { role: "assistant", content: [{ type: "text", text: "a".repeat(40) }] },
+  ],
+  system: [], tools: {}, model: { id: "model-alpha", providerID: "test-provider" },
+}));
+const t25c = read().ses_T25E;
+check("T25c compaction hook: cold last-known cache does not clobber ctx (no write)", () => {
+  assert(t25cErr.length === 0, `no errors: ${t25cErr.join(" | ")}`);
+  assert(t25c.ctx === 5000, `ctx preserved, got ${t25c.ctx}`);
+  assert(t25c.compactStale === false && !t25c.compactedAt, "no stale mark when nothing was measured");
+});
+
 if (failed) fatal(`${failed} unit test(s) failed`);
-pass(`all ${ranChecks} unit checks passed (T1–T12 + T13–T24)`);
+pass(`all ${ranChecks} unit checks passed (T1–T12 + T13–T25)`);
 
 // ---------------------------------------------------------------------------
 // (e) corporate-identifier scan — no employer/vendor-specific names may appear

@@ -150,7 +150,7 @@
  */
 
 import { makeV1 } from "./lib/v1.js";
-import { handleV2Event, onV2Context, estimateBreakdownFromContext, estimateBreakdownFromClientMessages } from "./lib/v2.js";
+import { handleV2Event, onV2Context, onV2Compaction, estimateBreakdownFromContext, estimateBreakdownFromClientMessages } from "./lib/v2.js";
 import { breakdownCategories, computeReclaim, contentFingerprint, estimateTokens, extractToolTarget, isSafeSessionKey, safeCell, safeReclaim, safeSaneOrNull, safeToolOutByTool, sumCategories, toolOutEntries } from "./lib/estimate.js";
 import {
   commandContextBreakdown,
@@ -170,7 +170,7 @@ import {
   modelLimits,
   reserveFor,
 } from "./lib/limits.js";
-import { lastKnownCacheRead, lastKnownCacheWrite, sessionAgentCache, sessionParentCache } from "./lib/cache.js";
+import { lastKnownCacheRead, lastKnownCacheWrite, lastKnownCtxCache, lastKnownInputCache, lastKnownReasoningCache, sessionAgentCache, sessionParentCache } from "./lib/cache.js";
 import {
   logErr,
   readStateSnapshot,
@@ -204,6 +204,7 @@ export {
   estimateBreakdownFromContext,
   estimateBreakdownFromClientMessages,
   onV2Context,
+  onV2Compaction,
   safeToolOutByTool,
   toolOutEntries,
   sumCategories,
@@ -218,6 +219,10 @@ export {
   safeSaneOrNull,
   lastKnownCacheRead,
   lastKnownCacheWrite,
+  lastKnownCtxCache,
+  lastKnownInputCache,
+  lastKnownReasoningCache,
+  handleV2Event,
 };
 
 // ---------------------------------------------------------------------------
@@ -236,6 +241,19 @@ export default {
       );
     } catch (err) {
       logErr("v2 context hook registration failed", err);
+    }
+
+    // The compaction request carries the same pre-compaction context payload as
+    // the context hook. Registering it lets us persist the TRUE pre-compaction
+    // breakdown (see onV2Compaction); the `session.compacted` event then only
+    // acts as a fallback. A registration failure is non-fatal — the event path
+    // still marks the entry stale.
+    try {
+      registrations.push(
+        await ctx.session.hook("compaction", (context) => onV2Compaction(context)),
+      );
+    } catch (err) {
+      logErr("v2 compaction hook registration failed", err);
     }
 
     // The model registry is captured asynchronously through ensureModelLimits
