@@ -4,6 +4,28 @@ Notable user-facing changes per release. Dates are commit days (UTC).
 The package also ships a dual V1/V2 plugin — see the README for the surface
 matrix; everything below concerns the V2 path unless stated otherwise.
 
+## 1.5.2 — 2026-10-21
+
+Maintenance release: no runtime behavior change. It aligns the dev toolchain
+with opencode 2.1.2 and stops the CI drift gate from going red on patch
+releases.
+
+- Dev: `@opencode/plugin` devDependency pinned to `2.1.2`; `@opentui/solid`
+  and `@opentui/core` aligned with the 2.1.2 host (`0.6.6`).
+- Tests: the e2e gate now terminates reliably on Windows. `process.exit()`
+  could deadlock inside Node's native exit after the node-pty/conpty teardown:
+  the run printed its verdict and then hung forever (which would also hang
+  `prepublishOnly`). It now sets `exitCode`, closes the conpty sockets on a
+  natural child exit, and keeps an unref'd watchdog as a safety net.
+- Dev: `test/drift-watch.mjs` is now advisory on patch drift (warning, exit 0),
+  so the daily CI no longer goes red on every opencode patch. Breaking drift
+  still fails: a major bump, a minor bump of `@opencode/plugin`, a minor bump
+  for 0.x `@opentui/*`, or a structural host change (no `workspaces.catalog`
+  / no `@opentui` entries). `--strict` / `DRIFT_STRICT=1` fails on ANY drift
+  and is the release check; exit codes are set via `process.exitCode` so piped
+  CI logs are never truncated. README/CI unit-check counters updated to
+  T1-T25c / 62.
+
 ## 1.5.1 — 2026-10-19
 
 - **Compaction now handled by the real `compaction` hook.** opencode dispatches

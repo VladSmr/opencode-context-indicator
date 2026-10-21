@@ -258,6 +258,10 @@ function runPty(extraArgs, timeoutMs, isDone, graceMs = 0, configDir) {
       done = true;
       clearTimeout(timer);
       if (graceTimer) clearTimeout(graceTimer);
+      // Close the conpty sockets even when the child exited on its own. Without
+      // this, node-pty's datapipe keeps the event loop alive after a normal
+      // exit (Check B), and the process never drains.
+      try { p.kill(); } catch { /* already gone */ }
       killNewOpencodeCli(cliBefore); // no lingering isolated instances
       resolve({ buf, exitCode, timedOut });
     };
@@ -478,6 +482,24 @@ async function checkB() {
 }
 
 // ---------------------------------------------------------------------------
+// Exit helper
+// ---------------------------------------------------------------------------
+// Do NOT call process.exit() here. On Windows the node-pty/conpty teardown can
+// deadlock inside Node's native exit path: the process prints its verdict and
+// then never terminates, hanging prepublishOnly and any piped pipeline. Setting
+// exitCode and letting the event loop drain is reliable. The unref'd watchdog
+// is a safety net: it only fires if some handle keeps the loop alive, so the
+// gate can never hang forever.
+function finish(code) {
+  process.exitCode = code;
+  const watchdog = setTimeout(() => {
+    console.error("[e2e] event loop did not drain; forcing termination");
+    process.kill(process.pid, "SIGKILL");
+  }, 10_000);
+  watchdog.unref();
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 async function main() {
@@ -495,7 +517,7 @@ async function main() {
     console.error("[SKIP] opencode CLI not found. Searched:");
     CLI_CANDIDATES.forEach((c) => console.error(`  ${c}`));
     console.error("Set OPENCODE_CLI env var or install OpenCode Desktop.");
-    process.exit(0); // not a failure — CI may not have OpenCode
+    finish(0); return; // not a failure - CI may not have OpenCode
   }
 
   if (!quickMode && !process.env.OPENCODE_E2E_MODEL) {
@@ -505,7 +527,7 @@ async function main() {
     console.error("         set OPENCODE_E2E_MODEL=myprovider/some-model   (Windows cmd)");
     console.error("         $env:OPENCODE_E2E_MODEL='myprovider/some-model' (PowerShell)");
     console.error("       Or run load-only with:  node test/e2e-tui.mjs --quick");
-    process.exit(1);
+    finish(1); return;
   }
 
   if (!quickMode) {
@@ -515,11 +537,11 @@ async function main() {
   const desktopBefore = quickMode ? "" : desktopSnapshot();
 
   const a = await checkA();
-  if (!a) { console.error("\n[e2e FAILED] Check A"); process.exit(1); }
+  if (!a) { console.error("\n[e2e FAILED] Check A"); finish(1); return; }
 
   if (!quickMode) {
     const b = await checkB();
-    if (!b) { console.error("\n[e2e FAILED] Check B"); process.exit(1); }
+    if (!b) { console.error("\n[e2e FAILED] Check B"); finish(1); return; }
 
     const desktopAfter = desktopSnapshot();
     if (desktopBefore && desktopAfter) {
@@ -535,10 +557,10 @@ async function main() {
   console.log("\n" + "=".repeat(70));
   console.log(`ALL CHECKS PASSED  (${elapsed}s / ${budget}s budget)`);
   console.log("=".repeat(70));
-  process.exit(0);
+  finish(0);
 }
 
 main().catch((err) => {
   console.error("\n[FATAL]", err);
-  process.exit(1);
+  finish(1);
 });
