@@ -38,7 +38,7 @@
  *
  * Runtime requirements: @opentui/core and solid-js are optional peers resolved
  * by OpenCode at runtime. @opentui/solid is a pinned direct dependency (exact
- * 0.6.6): OpenCode's TUI loader does not expose a host instance of it, so for
+ * 0.6.8): OpenCode's TUI loader does not expose a host instance of it, so for
  * npm-installed plugins the JSX pragma would otherwise fail to resolve
  * `@opentui/solid/jsx-runtime` (upstream opencode issue #33884).
  *

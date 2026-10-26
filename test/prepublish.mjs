@@ -5,7 +5,7 @@
  *   (a) tarball composition (6 files, no dev/test artifacts)
  *   (b) tui.tsx transpiles with the Solid pragma intact
  *   (c) resolve chain — @opentui/solid + solid-js resolvable from tui.tsx context
- *   (d) unit-harness T1–T12 for the limit/agent/state fixes
+ *   (d) unit-harness T1–T28 for the limit/agent/state/command fixes
  *   (e) corporate-identifier scan (8 files)
  *   (f) non-English scan — no non-ASCII letters (any language other than
  *       English) anywhere in the published surface or the test tree
@@ -183,64 +183,64 @@ const seedState = {
   ses_MAIN: {
     sessionID:"ses_MAIN",parentID:null,role:"main",agent:"orchestrator",
     model:"model-alpha",providerID:"test-provider",ctx:279312,input:279000,
-    usable:471860,limit:524288,reasoning:0,
-    // new formula: window=524288, reserve=max(52428,16000)=52428, usable=471860
+    usable:445645,limit:524288,reasoning:0,
+    // new formula: window=524288, reserve=max(78643,16000)=78643, usable=445645
     categories:{user:1000,assistant:1000,reasoning:0,toolArgs:0,system:1000,toolSchemas:1000,other:1000},
     updatedAt:"2026-09-29T18:51:54.013Z",
   },
   ses_OLDAGENT: {
     sessionID:"ses_OLDAGENT",parentID:"ses_MAIN",role:"sub",agent:"code_critic",
     model:"model-beta",providerID:"test-provider",ctx:60950,input:60000,
-    usable:928128,limit:1048576,reasoning:0,
-    // new formula: window=1048576, reserve=max(104857,16000)=104857, usable=943719
+    usable:891290,limit:1048576,reasoning:0,
+    // new formula: window=1048576, reserve=max(157286,16000)=157286, usable=891290
     categories:{user:100,assistant:100,reasoning:0,toolArgs:0,system:null,toolSchemas:null,other:100},
     updatedAt:"2026-09-29T17:25:10.535Z",
   },
   ses_T7: {
     sessionID:"ses_T7",parentID:null,role:"main",agent:null,
     model:"model-gamma",providerID:"test-provider",ctx:50000,input:50000,
-    usable:180000,limit:200000,reasoning:0,
-    // new formula: window=200000, reserve=max(20000,16000)=20000, usable=180000
+    usable:170000,limit:200000,reasoning:0,
+    // new formula: window=200000, reserve=max(30000,16000)=30000, usable=170000
     categories:{user:100,assistant:100,reasoning:0,toolArgs:0,system:100,toolSchemas:100,other:100},
     updatedAt:"2026-09-29T18:00:00.000Z",
   },
   ses_T8: {
     sessionID:"ses_T8",parentID:null,role:"main",agent:null,
     model:"model-theta",providerID:"provA",ctx:10,input:10,
-    usable:200,limit:222,reasoning:0,
-    // new formula: window=222, reserve=max(22,0)=22, usable=200
+    usable:189,limit:222,reasoning:0,
+    // new formula: window=222, reserve=max(33,0)=33, usable=189
     categories:{user:1,assistant:1,reasoning:0,toolArgs:0,system:1,toolSchemas:1,other:1},
     updatedAt:"2026-09-29T18:00:00.000Z",
   },
   ses_T9_OLD: {
     sessionID:"ses_T9_OLD",parentID:null,role:"main",agent:null,
     model:"model-delta",providerID:"test-provider",ctx:1,input:1,
-    usable:180000,limit:200000,reasoning:0,
-    // new formula: window=200000, usable=180000 (stays, not filtered)
+    usable:170000,limit:200000,reasoning:0,
+    // new formula: window=200000, usable=170000 (stays, not filtered)
     categories:{user:1,assistant:1,reasoning:0,toolArgs:0,system:1,toolSchemas:1,other:1},
     updatedAt:"2026-09-29T10:00:00.000Z",
   },
   ses_T9_NEW: {
     sessionID:"ses_T9_NEW",parentID:null,role:"main",agent:null,
     model:"model-delta",providerID:"test-provider",ctx:1,input:1,
-    usable:943719,limit:1048576,reasoning:0,
-    // new formula: window=1048576, usable=943719 (stays, freshest wins via updatedAt)
+    usable:891290,limit:1048576,reasoning:0,
+    // new formula: window=1048576, usable=891290 (stays, freshest wins via updatedAt)
     categories:{user:1,assistant:1,reasoning:0,toolArgs:0,system:1,toolSchemas:1,other:1},
     updatedAt:"2026-09-29T18:00:00.000Z",
   },
   ses_T10_A: {
     sessionID:"ses_T10_A",parentID:null,role:"main",agent:null,
     model:"model-epsilon",providerID:"test-provider",ctx:1,input:1,
-    usable:180000,limit:200000,reasoning:0,
-    // new formula: window=200000, usable=180000 (stays)
+    usable:170000,limit:200000,reasoning:0,
+    // new formula: window=200000, usable=170000 (stays)
     categories:{user:1,assistant:1,reasoning:0,toolArgs:0,system:1,toolSchemas:1,other:1},
     updatedAt:"2026-09-29T10:00:00.000Z",
   },
   ses_T10_B: {
     sessionID:"ses_T10_B",parentID:null,role:"main",agent:null,
     model:"model-epsilon",providerID:"test-provider",ctx:1,input:1,
-    usable:180000,limit:200000,reasoning:0,
-    // new formula: window=200000, usable=180000 (freshest via updatedAt)
+    usable:170000,limit:200000,reasoning:0,
+    // new formula: window=200000, usable=170000 (freshest via updatedAt)
     categories:{user:1,assistant:1,reasoning:0,toolArgs:0,system:1,toolSchemas:1,other:1},
     updatedAt:"2026-09-29T18:00:00.000Z",
   },
@@ -255,8 +255,8 @@ const seedState = {
   ses_T12: {
     sessionID:"ses_T12",parentID:null,role:"main",agent:null,
     model:"model-eta",providerID:"test-provider",ctx:1,input:1,
-    usable:450000,limit:500000,reasoning:0,
-    // new formula: window=500000, reserve=50000, usable=450000 (seed usable valid, <= limit)
+    usable:425000,limit:500000,reasoning:0,
+    // new formula: window=500000, reserve=75000, usable=425000 (seed usable valid, <= limit)
     categories:{user:1,assistant:1,reasoning:0,toolArgs:0,system:1,toolSchemas:1,other:1},
     updatedAt:"2026-09-29T18:00:00.000Z",
   },
@@ -264,16 +264,16 @@ const seedState = {
   ses_EXT_A: {
     sessionID:"ses_EXT_A",parentID:null,role:"main",agent:"code_critic",
     model:"Claude-3.5-Sonnet",providerID:"anthropic",ctx:200000,input:199000,
-    usable:180000,limit:200000,reasoning:0,
-    // new formula: window=200000, usable=180000 (matches seed)
+    usable:170000,limit:200000,reasoning:0,
+    // new formula: window=200000, usable=170000 (matches seed)
     categories:{user:1,assistant:1,reasoning:0,toolArgs:0,system:1,toolSchemas:1,other:1},
     updatedAt:"2026-09-29T12:00:00.000Z",
   },
   ses_EXT_B: {
     sessionID:"ses_EXT_B",parentID:null,role:"main",agent:null,
     model:"gemini-2.5-Pro",providerID:"google",ctx:1048576,input:1048000,
-    usable:943719,limit:1048576,reasoning:0,
-    // new formula: window=1048576, usable=943719 (matches seed)
+    usable:891290,limit:1048576,reasoning:0,
+    // new formula: window=1048576, usable=891290 (matches seed)
     categories:{user:1,assistant:1,reasoning:0,toolArgs:0,system:1,toolSchemas:1,other:1},
     updatedAt:"2026-09-29T15:30:00.000Z",
   },
@@ -283,14 +283,14 @@ const seedState = {
   ses_T17_OLD: {
     sessionID:"ses_T17_OLD",parentID:null,role:"main",agent:null,
     model:"model-tombstone-old",providerID:"test-provider",ctx:1,input:1,
-    usable:180000,limit:200000,reasoning:0,
+    usable:170000,limit:200000,reasoning:0,
     categories:{user:1,assistant:1,reasoning:0,toolArgs:0,system:1,toolSchemas:1,other:1},
     updatedAt:new Date(Date.now() - 40 * 86400e3).toISOString(),
   },
   ses_T17_FRESH: {
     sessionID:"ses_T17_FRESH",parentID:null,role:"main",agent:null,
     model:"model-tombstone-fresh",providerID:"test-provider",ctx:1,input:1,
-    usable:180000,limit:200000,reasoning:0,
+    usable:170000,limit:200000,reasoning:0,
     categories:{user:1,assistant:1,reasoning:0,toolArgs:0,system:1,toolSchemas:1,other:1},
     updatedAt:new Date(Date.now() - 1 * 86400e3).toISOString(),
   },
@@ -359,8 +359,8 @@ const e2 = quietErr(() => mod.writeStateFile("ses_MAIN","model-alpha","test-prov
 check("T2 writeStateFile preserves usable/limit/agent (cold)", () => {
   assert(e2.length === 0);
   const e = read().ses_MAIN;
-  // NEW formula: seed context=524288, reserve=max(52428,16000)=52428, usable=471860
-  assert(e.ctx === 279312 && e.usable === 471860 && e.limit === 524288 && e.agent === "orchestrator");
+  // NEW formula: seed context=524288, reserve=max(78643,16000)=78643, usable=445645
+  assert(e.ctx === 279312 && e.usable === 445645 && e.limit === 524288 && e.agent === "orchestrator");
 });
 
 // T3
@@ -380,22 +380,22 @@ const state1 = read();
 const repMain = await mod.collectSessionReport(mockCtx,"ses_MAIN",state1,Date.now()+2000);
 const rowMain = mod.renderSessionRow(repMain, true);
 check("T4 main row keeps the % (denominator from state)", () => {
-  // NEW formula: usable=471860; ctx=279312; pct=279312/471860=59%
-  assert(repMain.usable === 471860);
+  // NEW formula: usable=445645; ctx=279312; pct=279312/445645=63%
+  assert(repMain.usable === 445645);
   assert(rowMain.startsWith("| main |"));
-  assert(rowMain.includes("(59%)"), rowMain);
+  assert(rowMain.includes("(63%)"), rowMain);
 });
 
 // T4b
 const sumText = mod.shortSummaryText(repMain);
 const sumDesc = mod.shortSummaryDescription(repMain);
 check("T4b /context summary shows denominator + % + compact-at", () => {
-  // ctx=279312, usable=471860, pct=59%, reserve=max(52428,16000)=52428
-  assert(sumText.includes("/ 471.9k (59%)"), sumText.split("\n")[0]);
-  assert(sumText.includes("compact at 471.9k"), sumText);
-  // fmt(52428) = "52.4k"
-  assert(sumText.includes("(52.4k reserve)"), sumText);
-  assert(sumDesc.includes("(59%)"), sumDesc);
+  // ctx=279312, usable=445645, pct=63%, reserve=max(78643,16000)=78643
+  assert(sumText.includes("/ 445.6k (63%)"), sumText.split("\n")[0]);
+  assert(sumText.includes("compact at 445.6k"), sumText);
+  // fmt(78643) = "78.6k"
+  assert(sumText.includes("(78.6k reserve)"), sumText);
+  assert(sumDesc.includes("(63%)"), sumDesc);
 });
 
 // T5
@@ -425,12 +425,12 @@ capture(() => mod.hydrateModelLimitsFromState());
 const state2 = read();
 const repT7 = await mod.collectSessionReport(mockCtx,"ses_T7",state2,Date.now()+2000);
 check("T7 denominator == entry.limit window (new formula, not old usable-as-window)", () => {
-  // Seed: limit=200000, usable=180000. New formula: window=200000, reserve=max(20000,16000)=20000, usable=180000
+  // Seed: limit=200000, usable=170000. New formula: window=200000, reserve=max(30000,16000)=30000, usable=170000
   // (The old formula would have double-reserved; new formula re-derives correctly)
-  assert(mod.getUsableContext("test-provider","model-gamma")?.usable === 180000);
-  assert(repT7.usable === 180000, `got ${repT7.usable}`);
-  // reserve should be 20000 (10% of 200000, which exceeds 16000)
-  assert(mod.getUsableContext("test-provider","model-gamma")?.reserved === 20000);
+  assert(mod.getUsableContext("test-provider","model-gamma")?.usable === 170000);
+  assert(repT7.usable === 170000, `got ${repT7.usable}`);
+  // reserve should be 30000 (15% of 200000, which exceeds 16000)
+  assert(mod.getUsableContext("test-provider","model-gamma")?.reserved === 30000);
 });
 
 // T8
@@ -445,19 +445,19 @@ check("T8 provider change does not inherit usable/limit", () => {
 // T9
 mod.modelLimits.clear();
 const cap9 = capture(() => mod.hydrateModelLimitsFromState());
-check("T9 stale 180k vs fresh 943719 -> freshest wins", () => {
-  // new formula: window=1048576, reserve=max(104857,16000)=104857, usable=943719
-  assert(mod.getUsableContext("test-provider","model-delta")?.usable === 943719);
-  assert(cap9.logs.some((l)=>l.includes("model-delta")&&l.includes("943719")));
+check("T9 stale 170k vs fresh 891290 -> freshest wins", () => {
+  // new formula: window=1048576, reserve=max(157286,16000)=157286, usable=891290
+  assert(mod.getUsableContext("test-provider","model-delta")?.usable === 891290);
+  assert(cap9.logs.some((l)=>l.includes("model-delta")&&l.includes("891290")));
   assert(cap9.errs.some((l)=>l.includes("spread")&&l.includes("model-delta")));
 });
 
 // T10
 mod.modelLimits.clear();
 const cap10 = capture(() => mod.hydrateModelLimitsFromState());
-check("T10 uniform candidates -> 180k, no spread warning", () => {
-  // new formula: window=200000, usable=180000
-  assert(mod.getUsableContext("test-provider","model-epsilon")?.usable === 180000);
+check("T10 uniform candidates -> 170k, no spread warning", () => {
+  // new formula: window=200000, usable=170000
+  assert(mod.getUsableContext("test-provider","model-epsilon")?.usable === 170000);
   assert(!cap10.errs.some((l)=>l.includes("model-epsilon")));
 });
 
@@ -473,9 +473,9 @@ check("T11 usable > limit is dropped", () => {
 mod.modelLimits.clear();
 const cap12 = capture(() => mod.hydrateModelLimitsFromState());
 check("T12 usable < limit is LEGITIMATE, seeded", () => {
-  // new formula: window=500000, reserve=50000, usable=450000 (seed usable <= limit)
-  assert(mod.getUsableContext("test-provider","model-eta")?.usable === 450000);
-  assert(cap12.logs.some((l)=>l.includes("model-eta")&&l.includes("450000")));
+  // new formula: window=500000, reserve=75000, usable=425000 (seed usable <= limit)
+  assert(mod.getUsableContext("test-provider","model-eta")?.usable === 425000);
+  assert(cap12.logs.some((l)=>l.includes("model-eta")&&l.includes("425000")));
 });
 
 if (failed) fatal(`${failed} unit test(s) failed`);
@@ -669,41 +669,40 @@ check("T15a exportFileName: id8 truncation", () => {
   assert(!name.includes("averylongsessionidstringhere"), "full session id leaked");
 });
 
-check("T16 new formula: window 200000 -> usable 180000 reserve 20000", () => {
-  // 200000 >= 32000, so reserve = max(20000, 16000) = 20000
-  assert(mod.getUsableContext("test-provider","model-gamma")?.usable === 180000, "window=200000: usable should be 180000");
-  assert(mod.getUsableContext("test-provider","model-gamma")?.reserved === 20000, "reserve should be 20000");
+check("T16 new formula: window 200000 -> usable 170000 reserve 30000", () => {
+  // 200000 >= 32000, so reserve = max(30000, 16000) = 30000 (core 2.1.4: 15%)
+  assert(mod.getUsableContext("test-provider","model-gamma")?.usable === 170000, "window=200000: usable should be 170000");
+  assert(mod.getUsableContext("test-provider","model-gamma")?.reserved === 30000, "reserve should be 30000");
 });
 
-check("T16a new formula: window 100000 -> usable 84000 reserve 16000", () => {
-  // 100000 >= 32000, so reserve = max(10000, 16000) = 16000
-  // We need a model with window=100000. Using model-alpha with context=524288
-  // is already seeded. Let's check the formula directly.
+check("T16a new formula: window 100000 -> reserve 16000 (min beats 15%)", () => {
+  // floor(100000 * 0.15) = 15000 < 16000 -> RESERVE_MIN wins
   const r = mod.reserveFor(100000, undefined);
   assert(r === 16000, `window=100000: reserve should be 16000, got ${r}`);
-  // Also test via getUsableContext with input override (seed doesn't have input)
-  // We test reserveFor directly
 });
 
-check("T16b new formula: window 24000 -> usable 21600 reserve 2400", () => {
-  // 24000 < 32000, so reserve = max(2400, 0) = 2400
+check("T16b new formula: window 24000 -> reserve 3600", () => {
+  // 24000 < 2 * RESERVE_MIN, so no floor: floor(24000 * 0.15) = 3600
   const r = mod.reserveFor(24000, undefined);
-  assert(r === 2400, `window=24000: reserve should be 2400, got ${r}`);
+  assert(r === 3600, `window=24000: reserve should be 3600, got ${r}`);
 });
 
-check("T16c new formula: window 30000 -> usable 27000 reserve 3000", () => {
-  // 30000 < 32000, so reserve = max(3000, 0) = 3000
+check("T16c new formula: window 30000 -> reserve 4500", () => {
+  // 30000 < 32000, so no floor: floor(30000 * 0.15) = 4500
   const r = mod.reserveFor(30000, undefined);
-  assert(r === 3000, `window=30000: reserve should be 3000, got ${r}`);
+  assert(r === 4500, `window=30000: reserve should be 4500, got ${r}`);
+});
+
+check("T16c2 new formula: window 32000 -> reserve 16000 (threshold)", () => {
+  // 32000 === 2 * RESERVE_MIN -> floor = RESERVE_MIN
+  assert(mod.reserveFor(32000, undefined) === 16000);
+  assert(mod.reserveFor(31999, undefined) === 4799);
 });
 
 check("T16d new formula: input preferred over context", () => {
-  // model-gamma: limit=200000, window=200000. Test formula with explicit input.
-  // reserveFor(120000, undefined) = max(12000, 16000) = 16000
+  // reserveFor(120000) = max(18000, 16000) = 18000
   const r = mod.reserveFor(120000, undefined);
-  assert(r === 16000, `window=120000: reserve should be 16000, got ${r}`);
-  // getUsableContext uses the record's input or context as window
-  // We already verified input context through the formula test; this is covered by T16
+  assert(r === 18000, `window=120000: reserve should be 18000, got ${r}`);
   assert(mod.getUsableContext("test-provider","model-gamma")?.limit === 200000, "window is the seeded context");
 });
 
@@ -712,16 +711,13 @@ check("T16e new formula: unknown limits -> null", () => {
 });
 
 check("T16f new formula: hydrated seed no double-reserve", () => {
-  // Seed ses_T7: usable=180000, limit=200000.
-  // OLD formula: usable=180000 (persisted), getUsableContext re-derived it.
-  // NEW formula: window=200000, reserve=20000, usable=180000 (same result, no double-reserve).
-  // Verify: the seeded record context=200000,input=null gives usable=180000.
+  // Seed ses_T7: usable=170000, limit=200000.
+  // The seed is re-derived from the raw window: 200000 - 30000 = 170000.
   mod.modelLimits.clear();
   capture(() => mod.hydrateModelLimitsFromState());
   const info = mod.getUsableContext("test-provider","model-gamma");
-  assert(info?.usable === 180000, `hydrated usable should be 180000, got ${info?.usable}`);
-  assert(info?.reserved === 20000, `hydrated reserve should be 20000, got ${info?.reserved}`);
-  // The usable exactly matches the seed (no double-reserve: 200000-20000=180000)
+  assert(info?.usable === 170000, `hydrated usable should be 170000, got ${info?.usable}`);
+  assert(info?.reserved === 30000, `hydrated reserve should be 30000, got ${info?.reserved}`);
 });
 
 check("T16g reserveFor: bufferOverride takes precedence", () => {
@@ -731,17 +727,33 @@ check("T16g reserveFor: bufferOverride takes precedence", () => {
 
 check("T16h reserveFor: invalid bufferOverride falls through to formula", () => {
   const r1 = mod.reserveFor(200000, -1);
-  assert(r1 === 20000, `negative bufferOverride should be ignored, got ${r1}`);
+  assert(r1 === 30000, `negative bufferOverride should be ignored, got ${r1}`);
   const r2 = mod.reserveFor(200000, 1e10);
-  assert(r2 === 20000, `>1e9 bufferOverride should be ignored, got ${r2}`);
+  assert(r2 === 30000, `>1e9 bufferOverride should be ignored, got ${r2}`);
   const r3 = mod.reserveFor(200000, NaN);
-  assert(r3 === 20000, `NaN bufferOverride should be ignored, got ${r3}`);
-  // Non-numbers: JS type guard prevents them from entering the numeric branch
+  assert(r3 === 30000, `NaN bufferOverride should be ignored, got ${r3}`);
   const r4 = mod.reserveFor(200000, "not a number");
-  assert(r4 === 20000, `string bufferOverride should be ignored, got ${r4}`);
-  // Valid: 0 and 1e9 are accepted
+  assert(r4 === 30000, `string bufferOverride should be ignored, got ${r4}`);
+  // Valid: 0 is accepted (zero reserve), and any value < window is honored.
   assert(mod.reserveFor(200000, 0) === 0);
-  assert(mod.reserveFor(200000, 1e9) === 1e9);
+  assert(mod.reserveFor(200000, 199999) === 199999);
+});
+
+check("T16h2 reserveFor: buffer >= window is ignored (core semantics)", () => {
+  // A buffer configured for a larger model must not leave zero room.
+  assert(mod.reserveFor(200000, 200000) === 30000);
+  assert(mod.reserveFor(200000, 250000) === 30000);
+  assert(mod.reserveFor(50000, 50000) === 16000);
+  // getUsableContext must apply the same guard to the env override.
+  const prev = process.env.OPENCODE_CONTEXT_INDICATOR_COMPACT_BUFFER;
+  process.env.OPENCODE_CONTEXT_INDICATOR_COMPACT_BUFFER = "250000";
+  try {
+    const info = mod.getUsableContext("test-provider", "model-gamma");
+    assert(info?.usable === 170000, `ignored oversized env buffer, got ${info?.usable}`);
+  } finally {
+    if (prev === undefined) delete process.env.OPENCODE_CONTEXT_INDICATOR_COMPACT_BUFFER;
+    else process.env.OPENCODE_CONTEXT_INDICATOR_COMPACT_BUFFER = prev;
+  }
 });
 
 check("T16i reserveFor: non-finite window returns null", () => {
@@ -1289,8 +1301,183 @@ check("T25c compaction hook: cold last-known cache does not clobber ctx (no writ
   assert(t25c.compactStale === false && !t25c.compactedAt, "no stale mark when nothing was measured");
 });
 
+// ---- T26-T28: compaction reserve, top consumers, /context-diff ----
+
+const cacheMod = await import(pathToFileURL(join(repoRoot, "lib", "cache.js")).href);
+
+check("T26 reserve formula mirrors opencode 2.1.4 (0.15 share, 16k floor, 32k gate)", () => {
+  const cases = [
+    [200000, 30000],
+    [524288, 78643],
+    [1048576, 157286],
+    [100000, 16000],
+    [32000, 16000],
+    [31999, 4799],
+    [1000, 150],
+    [1, 0],
+  ];
+  for (const [win, want] of cases) {
+    const got = mod.reserveFor(win, undefined);
+    assert(got === want, `window=${win}: reserve ${got} !== ${want}`);
+  }
+});
+
+// T27 — top-5 heaviest single items: live estimate -> persisted (path-free) ->
+// rendered section.
+const t27Context = {
+  messages: [
+    { role: "user", content: [{ type: "text", text: "u".repeat(4000) }] }, // 1000
+    {
+      role: "assistant",
+      content: [
+        { type: "tool-call", id: "c1", name: "read", input: { filePath: "src/abc.ts" } },
+        { type: "tool-result", id: "c1", name: "read", result: { type: "text", value: "r".repeat(8000) } }, // 2000
+        { type: "reasoning", text: "x".repeat(2000) }, // 500
+        { type: "text", text: "a".repeat(1000) }, // 250
+      ],
+    },
+  ],
+  system: [{ type: "text", text: "s".repeat(400) }], // 100
+  tools: {},
+};
+const t27Parts = mod.estimateBreakdownFromContext(t27Context, null);
+check("T27 top consumers: heaviest first, bounded to 5, targets on live data", () => {
+  assert(Array.isArray(t27Parts.top) && t27Parts.top.length === 5, `got ${t27Parts.top?.length}`);
+  assert(t27Parts.top[0].kind === "tool" && t27Parts.top[0].tokens === 2000, JSON.stringify(t27Parts.top[0]));
+  assert(t27Parts.top[0].name === "read" && t27Parts.top[0].target === "src/abc.ts");
+  assert(t27Parts.top[1].kind === "user" && t27Parts.top[1].tokens === 1000);
+  assert(t27Parts.top[2].kind === "reasoning" && t27Parts.top[2].tokens === 500);
+  const kinds = t27Parts.top.map((t) => t.kind);
+  assert(kinds.includes("system") || kinds.includes("assistant"), kinds.join(","));
+});
+
+check("T27a top consumers: persisted copy is path-free and sanitised", () => {
+  cacheMod.breakdownCache.set("ses_TOP", {
+    ...t27Parts,
+    capturedAt: Date.now(),
+    source: "context-hook",
+  });
+  mod.writeStateFile("ses_TOP", "model-gamma", "test-provider", 6000, 6000, 0);
+  const e = read().ses_TOP;
+  assert(Array.isArray(e.top) && e.top.length === 5, `persisted top: ${JSON.stringify(e.top)}`);
+  assert(e.top[0].kind === "tool" && e.top[0].tokens === 2000);
+  assert(!("target" in e.top[0]), "target must not be persisted");
+  assert(!JSON.stringify(e.top).includes("src/abc.ts"), "no path leaked into state.json");
+});
+
+const t27Report = await mod.collectSessionReport(mockCtx, "ses_TOP", read(), 0);
+const t27Table = mod.renderBreakdownTable(
+  [mod.renderSessionRow(t27Report, true)],
+  0,
+  t27Report,
+);
+check("T27b top consumers: rendered section uses live targets + input share", () => {
+  assert(t27Report.top && t27Report.top[0].target === "src/abc.ts", "live cache keeps the target");
+  assert(t27Table.includes("### Top context consumers (main)"), t27Table);
+  assert(t27Table.includes("tool result · read src/abc.ts"), t27Table);
+  assert(t27Table.includes("~2.0k (33% of input)"), t27Table);
+});
+
+// T28 — /context-diff: previous distinct measurement, inherited on repeats.
+cacheMod.breakdownCache.delete("ses_DIFF");
+quietErr(() => mod.writeStateFile("ses_DIFF", "model-gamma", "test-provider", 1000, 1000, 0));
+const t28First = read().ses_DIFF;
+cacheMod.breakdownCache.set("ses_DIFF", {
+  ...mod.estimateBreakdownFromContext({
+    messages: [{ role: "user", content: [{ type: "text", text: "x".repeat(4000) }] }],
+    system: [],
+    tools: {},
+  }, null),
+  capturedAt: Date.now(),
+  source: "context-hook",
+});
+quietErr(() => mod.writeStateFile("ses_DIFF", "model-gamma", "test-provider", 2000, 2000, 0));
+const t28Second = read().ses_DIFF;
+check("T28 diff: previous holds the replaced measurement; repeat writes inherit it", () => {
+  assert(t28First.previous == null, "first measurement has no previous");
+  assert(t28Second.previous && t28Second.previous.ctx === 1000, JSON.stringify(t28Second.previous));
+  assert(t28Second.previous.categories.user === 0);
+  quietErr(() => mod.writeStateFile("ses_DIFF", "model-gamma", "test-provider", 2000, 2000, 0));
+  assert(
+    JSON.stringify(read().ses_DIFF.previous) === JSON.stringify(t28Second.previous),
+    "an unchanged repeat write must not shift `previous`",
+  );
+});
+
+const t28Report = await mod.collectSessionReport(mockCtx, "ses_DIFF", read(), 0);
+const t28Diff = mod.renderContextDiff(t28Report);
+check("T28a diff: renders total + category deltas", () => {
+  assert(t28Diff.includes("total 1.0k -> 2.0k"), t28Diff);
+  assert(t28Diff.includes("(+1.0k tokens, +100%)"), t28Diff);
+  assert(t28Diff.includes("| user | 0 | 1.0k | +1.0k |"), t28Diff);
+  assert(t28Diff.includes("previous "), t28Diff);
+});
+
+cacheMod.breakdownCache.delete("ses_DIFF_FRESH");
+quietErr(() => mod.writeStateFile("ses_DIFF_FRESH", "model-gamma", "test-provider", 500, 500, 0));
+const t28FreshReport = await mod.collectSessionReport(mockCtx, "ses_DIFF_FRESH", read(), 0);
+check("T28b diff: no previous measurement is reported honestly", () => {
+  const diff = mod.renderContextDiff(t28FreshReport);
+  assert(diff.includes("No previous measurement yet"), diff);
+});
+
+// T28c — a mirror/idle write with no token figure (all lastKnown* caches empty
+// in THIS instance) must inherit the previous same-model numbers and must not
+// rotate the diff baseline.
+cacheMod.breakdownCache.delete("ses_DIFF");
+quietErr(() => mod.writeStateFile("ses_DIFF", "model-gamma", "test-provider", 0, 0, 0));
+const t28Unmeasured = read().ses_DIFF;
+check("T28c unmeasured write keeps ctx/input and the previous baseline", () => {
+  assert(t28Unmeasured.ctx === 2000, `ctx preserved, got ${t28Unmeasured.ctx}`);
+  assert(t28Unmeasured.input === 2000, `input preserved, got ${t28Unmeasured.input}`);
+  assert(
+    JSON.stringify(t28Unmeasured.previous) === JSON.stringify(t28Second.previous),
+    "previous must not rotate on an unmeasured write",
+  );
+});
+
+// T28e — the same on an instance that does not even know the model (caches
+// cleared after idle): an unknown model must not overwrite the known identity
+// or drop the counters.
+quietErr(() => mod.writeStateFile("ses_DIFF", "unknown", "", 0, 0, 0));
+const t28Unknown = read().ses_DIFF;
+check("T28e unmeasured unknown-model write keeps identity + counters", () => {
+  assert(t28Unknown.model === "model-gamma", `model preserved, got ${t28Unknown.model}`);
+  assert(t28Unknown.providerID === "test-provider", `provider preserved, got ${t28Unknown.providerID}`);
+  assert(t28Unknown.ctx === 2000 && t28Unknown.input === 2000);
+  assert(
+    JSON.stringify(t28Unknown.previous) === JSON.stringify(t28Second.previous),
+    "previous must not rotate when the model is unknown",
+  );
+});
+
+check("T28d diff: a null category renders n/a, not a fake gain", () => {
+  const diff = mod.renderContextDiff({
+    modelID: "m",
+    ctxTokens: 100,
+    inputTokens: 100,
+    usable: null,
+    updatedAt: "2026-10-08T14:30:00.000Z",
+    categories: {
+      user: 10, assistant: 0, reasoning: 0, toolArgs: 0,
+      toolOut: 0, system: 5, toolSchemas: null, other: 0,
+    },
+    previous: {
+      model: "m",
+      ctx: 50,
+      input: 50,
+      updatedAt: null,
+      categories: {
+        user: 10, assistant: 0, reasoning: 0, toolArgs: 0,
+        toolOut: 0, system: null, toolSchemas: null, other: 0,
+      },
+    },
+  });
+  assert(diff.includes("| system | n/a | 5 | n/a |"), diff);
+});
+
 if (failed) fatal(`${failed} unit test(s) failed`);
-pass(`all ${ranChecks} unit checks passed (T1–T12 + T13–T25)`);
+pass(`all ${ranChecks} unit checks passed (T1–T12 + T13–T28)`);
 
 // ---------------------------------------------------------------------------
 // (e) corporate-identifier scan — no employer/vendor-specific names may appear

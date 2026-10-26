@@ -67,7 +67,7 @@
  *   event-driven and does not need the removed API.
  *
  *   V2 slash commands (added 1.1.0, verified against the live Desktop 2.0.19
- *   plugin runtime). Two commands:
+ *   plugin runtime). Three commands:
  *     - /context — a 3-line summary of THIS session only (model, tokens, %,
  *       updated + category line). Main only: NO subagent traversal and NO live
  *       RPC (cache + state.json only), so it is instant. Delivered with
@@ -78,7 +78,11 @@
  *       descendants), collected in parallel under one budget. Delivered with
  *       resume:true and a verbatim instruction prefix, so the agent echoes the
  *       table into the transcript as a normal message (rendered in full by the
- *       Desktop); resume:false remains a one-constant fallback.
+ *       Desktop); resume:false remains a one-constant fallback. Includes the
+ *       top-5 heaviest single context consumers (main).
+ *     - /context-diff — the previous distinct measurement (ctx + per-category
+ *       deltas) vs the current one, main only, cache + state.json only. Also
+ *       delivered with resume:true under a <context-diff> tag.
  *     - ctx.command.transform(editor => editor.add({ name, description,
  *         execute })) — registers a slash command; `execute` receives the
  *       invocation { sessionID, prompt:{text,files,agents,skills}, delivery }.
@@ -123,8 +127,8 @@
  *
  *   - Metric: the native opencode overflow count — tokens.total when present,
  *     else input + output + cache.read + cache.write — compared against the
- *     model's compaction ceiling (opencode v2.0.23 calculateCeiling): window =
-  *     limit.input || limit.context, reserve = max(10% of window, 16k when
+ *     model's compaction ceiling (opencode 2.1.4 calculateCeiling): window =
+  *     limit.input || limit.context, reserve = max(15% of window, 16k when
   *     window >= 32k), usable = window - reserve. Percentages are NOT
   *     clamped at 100% - exceeding the ceiling must stay visible.
  *   - Category estimates use a unicode-aware heuristic (see estimateTokens):
@@ -154,11 +158,13 @@ import { handleV2Event, onV2Context, onV2Compaction, estimateBreakdownFromContex
 import { breakdownCategories, computeReclaim, contentFingerprint, estimateTokens, extractToolTarget, isSafeSessionKey, safeCell, safeReclaim, safeSaneOrNull, safeToolOutByTool, sumCategories, toolOutEntries } from "./lib/estimate.js";
 import {
   commandContextBreakdown,
+  commandContextDiff,
   commandContextSummary,
   CONTEXT_BREAKDOWN_RESUME,
   collectSessionReport,
   renderSessionRow,
   renderBreakdownTable,
+  renderContextDiff,
   shortSummaryText,
   shortSummaryDescription,
 } from "./lib/commands.js";
@@ -197,6 +203,8 @@ export {
   collectSessionReport,
   renderSessionRow,
   renderBreakdownTable,
+  renderContextDiff,
+  commandContextDiff,
   shortSummaryText,
   shortSummaryDescription,
   ensureModelLimits,
@@ -276,8 +284,9 @@ export default {
       logErr("model limits prefetch failed", err),
     );
 
-    // Two V2 slash commands (V2 only): /context (instant per-session summary)
-    // and /context-breakdown (full table, main + all subagent descendants).
+    // Three V2 slash commands (V2 only): /context (instant per-session
+    // summary), /context-breakdown (full table, main + all subagent
+    // descendants), /context-diff (delta vs the previous measurement).
     // Guarded: older 2.0.x builds may lack ctx.command / ctx.session.synthetic —
     // registering a command whose handler cannot deliver would fail silently.
     try {
@@ -305,6 +314,13 @@ export default {
                     resume: CONTEXT_BREAKDOWN_RESUME,
                     name: "context-breakdown",
                   }),
+              });
+              editor.add({
+                name: "context-diff",
+                description:
+                  "What changed in the context since the previous measurement (main session)",
+                execute: (invocation) =>
+                  commandContextDiff(ctx, invocation, { name: "context-diff" }),
               });
             } catch (err) {
               logErr("v2 command transform failed", err);

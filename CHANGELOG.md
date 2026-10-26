@@ -4,6 +4,40 @@ Notable user-facing changes per release. Dates are commit days (UTC).
 The package also ships a dual V1/V2 plugin — see the README for the surface
 matrix; everything below concerns the V2 path unless stated otherwise.
 
+## 1.5.3 — 2026-10-26
+
+- **Compaction ceiling aligned with opencode 2.1.4 (#51271).** `lib/limits.js`
+  now mirrors `calculateCeiling()` exactly: the reserve is
+  `max(floor(window * 0.15), window >= 2 * 16_000 ? 16_000 : 0)` (was 10%),
+  and an override buffer is honored **only while it is smaller than the
+  window** — a buffer configured for a larger model is ignored instead of
+  leaving zero room. The `compact at` line and the `%` denominator now match the
+  host's actual auto-compaction trigger.
+- **Top context consumers.** `/context-breakdown` adds a
+  `### Top context consumers (main)` section listing the 5 heaviest single items
+  still in the assembled request (one tool result, one message, the system
+  prompt, one tool-call's args) with their share of `input`. Tool targets are
+  shown live; the `state.json` copy (`top`) is path-free, like the waste
+  detector.
+- **`/context-diff`.** New slash command: the previous distinct measurement vs
+  the current one (ctx total + per-category deltas, unchanged rows omitted).
+  `state.json` persists a `previous` snapshot; an unchanged / mirror write
+  inherits it, so the diff always spans two different observations. Main
+  session only, cache + `state.json` only (no RPC), delivered under the
+  `<context-diff>` tag with `resume:true` like the other commands.
+- Dev: `@opencode/plugin` devDependency pinned to `2.1.4`; `@opentui/solid`
+  and `@opentui/core` aligned with the 2.1.4 host (`0.6.8`). The 2.1.4 type
+  changes are internal (`DeepMutable` re-exported from effect; an unused
+  `permission.descending` brand); the `./tui` surface we import is unchanged.
+  `@opentui/solid` 0.6.8 is byte-identical to 0.6.6 in `dist/` and
+  `scripts/`; only its `@opentui/core` dependency moved to 0.6.8.
+- Tests: T26 (2.1.4 reserve table + buffer-over-window guard), T27/T27a/T27b
+  (top consumers: estimate → path-free persistence → rendered section),
+  T28/T28a/T28b/T28c/T28d/T28e (`previous` inheritance → diff rendering →
+  honest empty state → unmeasured-write guard (known + unknown model) →
+  null-safe delta); existing
+  T2/T4/T4b/T7/T9/T10/T12/T16* updated for the 0.15 reserve. 74 unit checks.
+
 ## 1.5.2 — 2026-10-21
 
 Maintenance release: no runtime behavior change. It aligns the dev toolchain
