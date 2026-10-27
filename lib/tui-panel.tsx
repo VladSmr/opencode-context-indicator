@@ -53,6 +53,74 @@ type PanelInput = {
 // (never once per poll) when it is unavailable and hide the whole section.
 let warnedMessagesUnavailable = false
 
+// Cheap change detector for the live message list. The host hands back a fresh
+// array on every poll, so identity cannot be used as a memo key, while walking
+// the whole list (per-character estimates + JSON.stringify of tool args) once
+// per 1000 ms tick is exactly the cost we want to avoid. Length + last message
+// id + created stamp + last message payload size covers appends, streaming and
+// tool completion; an in-place edit of an OLDER message lands one tick later,
+// when the tail changes. Known blind spot by design: the size is a SUM, so a
+// same-length substitution inside the last message is not detected.
+function listSignature(list: unknown[]): string {
+  const n = list.length
+  if (n === 0) return "0"
+  const last: unknown = list[n - 1]
+  if (last == null || typeof last !== "object") return `${n}:?`
+  const rec = last as Record<string, unknown>
+  const id = typeof rec.id === "string" ? rec.id : ""
+  const time = rec.time
+  const created =
+    time != null && typeof time === "object"
+      ? String((time as Record<string, unknown>).created ?? "")
+      : ""
+  let size = typeof rec.text === "string" ? rec.text.length : 0
+  const parts: unknown[] = Array.isArray(rec.content) ? rec.content : []
+  for (const raw of parts) {
+    if (raw == null || typeof raw !== "object") continue
+    const part = raw as Record<string, unknown>
+    if (typeof part.text === "string") {
+      size += part.text.length
+      continue
+    }
+    const state = part.state
+    if (state == null || typeof state !== "object") continue
+    const st = state as Record<string, unknown>
+    if (typeof st.input === "string") size += st.input.length
+    else if (st.input != null) {
+      try {
+        size += JSON.stringify(st.input).length
+      } catch {
+        /* unstringifiable input contributes no size */
+      }
+    }
+    // Tool RESULTS matter as much as args: measureContributors reads
+    // state.content, and a call that finishes between two ticks changes nothing
+    // else on the message. Without this the measured section would freeze for
+    // the whole remainder of the turn.
+    const content = st.content
+    if (typeof content === "string") {
+      size += content.length
+    } else if (Array.isArray(content)) {
+      for (const rawItem of content) {
+        if (rawItem == null || typeof rawItem !== "object") continue
+        const item = rawItem as Record<string, unknown>
+        if (typeof item.text === "string") {
+          size += item.text.length
+        } else {
+          // Non-text parts (e.g. file refs with long/base64 URIs) are not
+          // measured by measureContributors, so their marker is enough: never
+          // JSON.stringify a potentially megabyte-sized reference per tick.
+          size += 1
+        }
+      }
+    }
+    // Status transitions (pending -> completed/error) are cheap and always
+    // accompany a visible change.
+    if (typeof st.status === "string") size += st.status.length
+  }
+  return `${n}:${id}:${created}:${size}`
+}
+
 // Panel column layout (monospace), derived from the host-provided panel width
 // so cells never collide on narrow terminals. Gaps between columns keep a
 // truncated cell visually separated from its neighbour.
@@ -253,14 +321,38 @@ export function BreakdownPanel(props: {
     }
   })
 
+  // Memo for the measured contributors section: the signature/key pair keeps
+  // the expensive walk out of the per-tick path (see listSignature).
+  let contributorKey: string | null = null
+  let contributorValue: Contributor[] = []
+
   const contributors = createMemo<Contributor[]>(() => {
     const m = messages()
-    if (!m.available) return []
-    try {
-      return measureContributors(m.list)
-    } catch {
-      return []
+    if (!m.available) {
+      contributorKey = null
+      contributorValue = []
+      return contributorValue
     }
+    // Re-measure ONLY when the message list actually changed. The host rebuilds
+    // the array (and `props.snapshot()` ticks) every second, so keying on array
+    // identity would re-walk every message — per-character token estimates plus
+    // JSON.stringify of tool args — once per tick on the render thread.
+    let key: string
+    try {
+      key = listSignature(m.list)
+    } catch {
+      key = ""
+    }
+    if (key && key === contributorKey) return contributorValue
+    try {
+      contributorValue = measureContributors(m.list)
+      contributorKey = key || contributorKey
+    } catch {
+      // Transient failure: leave the key unset so the next tick retries.
+      contributorValue = []
+      contributorKey = null
+    }
+    return contributorValue
   })
 
   // Redacted export (key `e`). No message text, no full session id, no tool

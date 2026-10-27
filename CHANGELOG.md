@@ -4,6 +4,44 @@ Notable user-facing changes per release. Dates are commit days (UTC).
 The package also ships a dual V1/V2 plugin — see the README for the surface
 matrix; everything below concerns the V2 path unless stated otherwise.
 
+## 1.5.4 — 2026-10-27
+
+Fix-and-hygiene release after a full-project review. No new commands.
+
+- **Subagent roll-up no longer collapses on a child's idle.** `session.idle`
+  wiped the child's parent attribution and accumulated totals, so the very next
+  live line reported `subagents 0 session(s)` right after any subagent
+  finished, even though its parent was still running. V2 now keeps a finished
+  child's entries until the parent itself goes idle or is deleted
+  (`clearChildSubagentTracking`, breadth-first, so sub-subagents are collected
+  too); `/context-breakdown` and `/cx` were never affected (they read
+  `state.json`). T29 covers the lifetime.
+- **TUI panel no longer re-measures every message once per second.** The
+  measured-contributors memo was keyed on the 1000 ms snapshot tick and the host
+  rebuilds the message array on every poll, so the full walk (per-character
+  token estimates plus `JSON.stringify` of tool args) ran on the render thread
+  every second. It is now keyed on a cheap signature (list length, last message
+  id, last message size including tool results and status), so a static session
+  costs almost nothing while streaming text and completing tool calls still
+  refresh.
+- **A summary-only log write keeps the live snapshot.** `pushFinalSummary` used
+  to rewrite `context-breakdown.log` with an empty live section, so every idle /
+  compaction / command payload blanked it until the next measured write. The
+  module now remembers the last rendered snapshot and re-renders it.
+- Doc fixes: the log is rewritten atomically rather than "appended" with
+  `appendFileSync`, and both its sections are process-local (survive rewrites,
+  not a restart); the `state.json` field list now includes `toolOutByTool`,
+  `reclaim`, `cacheRead`/`cacheWrite` and `compactedAt`/`compactStale`; "tested
+  against opencode" now says 2.1.4 (was a stale v2.0.28); the gate table now
+  states the actual scan scope.
+- Packaging: `docs/` is published, so the README screenshot resolves on the npm
+  page. Gate (a) expands `docs/` the same way it expands `lib/` and rejects any
+  non-image file there.
+- Tests: new `OPENCODE_CONTEXT_INDICATOR_LOG_FILE` override (test isolation -
+  idle/compacted handlers no longer rewrite the user's real
+  `context-breakdown.log`), T29 added (child / grand-child lifetime). 75 unit
+  checks.
+
 ## 1.5.3 — 2026-10-26
 
 - **Compaction ceiling aligned with opencode 2.1.4 (#51271).** `lib/limits.js`

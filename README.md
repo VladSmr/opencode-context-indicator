@@ -13,7 +13,7 @@ arguments, tool results (the outputs fed back into context) and the residual
 The package ships a **dual V1 + V2 plugin** (one entry works in both OpenCode
 generations) plus an optional TUI module (`./tui` entry) that renders a **live
 sidebar** and a **zero-LLM `/cx` breakdown panel** with measured contributors
-and a redacted export. The V2 path is **tested against opencode v2.0.28**; the
+and a redacted export. The V2 path is **tested against opencode 2.1.4**; the
 V1 path against 1.18.29+.
 
 > **V1 is feature-frozen.** It is kept working for compatibility (bug fixes
@@ -302,8 +302,9 @@ notice if needed.
   are also seeded from the snapshot at startup, and the retry backs off
   (30 s → 5 min, capped). A known `usable`/`limit`/`agent` is never overwritten
   with `null` when another instance rewrites the snapshot.
-* All three commands append their payload to `context-breakdown.log` (final-summaries
-  section), so it stays recoverable even if delivery fails.
+* All three commands copy their payload into `context-breakdown.log` (final-summaries
+  section) while the plugin instance lives, so it stays recoverable even if
+  delivery fails (see the log lifetime note under "Log / state file locations").
 * If `ctx.session.synthetic` throws, the command logs an actionable error and the
   payload is preserved in the log — there is no other delivery channel in this
   runtime (no `noReply`/`prompt` option exists).
@@ -405,16 +406,24 @@ and `$TMPDIR` (usually `/tmp`) elsewhere:
 | File | Purpose |
 | --- | --- |
 | `context-breakdown.log` | Human-readable live snapshot + bounded final summaries |
-| `opencode-context-indicator-state.json` | Machine-readable snapshot consumed by the TUI sidebar and the `/cx` panel. Fields per entry: `sessionID`, `parentID`, `role`, `agent`, `model`, `providerID`, `ctx`, `input`, `usable` (compaction ceiling), `reserve` (tokens reserved for compaction), `limit` (context window), `reasoning`, `categories{user,assistant,reasoning,toolArgs,toolOut,system,toolSchemas,other}`, `top` (top-5 heaviest single items, path-free), `previous` (previous distinct measurement for `/context-diff`), `updatedAt`. |
+| `opencode-context-indicator-state.json` | Machine-readable snapshot consumed by the TUI sidebar and the `/cx` panel. Fields per entry: `sessionID`, `parentID`, `role`, `agent`, `model`, `providerID`, `ctx`, `input`, `usable` (compaction ceiling), `reserve` (tokens reserved for compaction), `limit` (context window), `reasoning`, `categories{user,assistant,reasoning,toolArgs,toolOut,system,toolSchemas,other}`, `toolOutByTool` (per-tool repeated-output estimate), `reclaim` (duplicate tool output, bounded), `cacheRead`/`cacheWrite` (provider-reported prompt-cache tokens), `compactedAt`/`compactStale`, `top` (top-5 heaviest single items, path-free), `previous` (previous distinct measurement for `/context-diff`), `updatedAt`. |
 | `context-events.log` | Raw event tap — **only** when `DEBUG_EVENTS` is flipped to `true` in the source (off by default) |
 
-The live `context-breakdown.log` snapshot is **rewritten** (never grows); final
-summaries (on `session.idle`) and compaction notes are **appended** — log writes
-use plain `appendFileSync`, not atomic replacement. Only the machine-readable
-`opencode-context-indicator-state.json` is written **atomically** (temp file +
-rename), so concurrent plugin instances cannot corrupt it. Cross-instance
-duplicate final summaries are prevented separately by an atomic claim marker
-(see `lib/dedup.js`).
+The whole `context-breakdown.log` is **rewritten atomically** (temp file +
+rename, like the state file): the live snapshot is always regenerated and the
+final summaries (on `session.idle`) plus compaction notes are re-rendered from
+an in-memory buffer (bounded, last 50 per log), so the file never grows and
+concurrent plugin instances cannot observe a half-written file. A summary-only
+write (idle, compaction, command payload) re-renders the last live snapshot, so
+adding a note never blanks that section. That snapshot may predate a compaction
+or a deleted session - the leading `[<timestamp>]` line is the freshness cue.
+Both parts are **process-local**: they
+survive every rewrite and failed command delivery within the lifetime of the
+running instance, but they are dropped when the plugin instance is re-created
+(opencode restarts, or about 24 h of idling). A different instance that rewrites
+the file keeps its own view of the summary buffer; cross-instance duplicate
+summaries are prevented separately by an atomic claim marker (see
+`lib/dedup.js`).
 
 ---
 
@@ -617,7 +626,7 @@ caller.
 ### Running tests
 
 ```bash
-npm run test:prepublish       # fast gate: tarball + tui.tsx + resolve + T1-T28 unit checks
+npm run test:prepublish       # fast gate: tarball + tui.tsx + resolve + T1-T29 unit checks
 npm run test:e2e              # full E2E: isolated plugin load + one "Say OK" round-trip
 npm run test:e2e:quick        # E2E load-only, no LLM call
 npm run test:drift            # advisory: warns on non-breaking host drift (also in CI)
@@ -636,12 +645,12 @@ STEP 80 s, ~3 min total.
 
 | Step | What | Why |
 |---|---|---|
-| (a) tarball composition | `package.json` `files[]` expands to the base files plus every `lib/*` module (count asserted dynamically) | no test/node_modules/tsconfig in the tarball |
+| (a) tarball composition | `package.json` `files[]` expands to the base files plus every `lib/*` module (count asserted dynamically); `docs/` may contain images only | no test/node_modules/tsconfig in the tarball |
 | (b) pragma regression | esbuild `--jsx=automatic` → `@opentui/solid/jsx-runtime` present, `react/jsx-runtime` absent | a removed/broken pragma kills the sidebar on npm install |
 | (c) resolve chain | replica install: host-bridged + peer packages resolve; local tui.tsx relative imports resolve via node from the entry (resolve-bridge.cjs) | broken peer/optional dep or a bad local import silently breaks the sidebar |
-| (d) unit harness T1-T28 | limit/agent/state fix assertions plus measureContributors, redacted-export, shared category-helper, sanitizer/unicode, prompt-cache, waste-detector, compaction-reserve, top-consumer and diff checks (74 total) | regressions in modelLimits, writeStateFile, hydrate, contributors, export |
-| (e) corporate-identifier scan | no forbidden identifiers in the published surface + test tree | compliance |
-| (f) non-English scan | no non-ASCII letters (`\p{L}` above U+007F) in any repo file | English-only source rule |
+| (d) unit harness T1-T29 | limit/agent/state fix assertions plus measureContributors, redacted-export, shared category-helper, sanitizer/unicode, prompt-cache, waste-detector, compaction-reserve, top-consumer, diff and subagent-rollup checks (75 total) | regressions in modelLimits, writeStateFile, hydrate, contributors, export, subagent lifetime |
+| (e) corporate-identifier scan | no forbidden identifiers in the published surface (`index.js`, `tui.tsx`, `lib/*`, `README.md`, `CHANGELOG.md`, `package.json`) or the test tree | compliance |
+| (f) non-English scan | no non-ASCII letters (`\p{L}` above U+007F) in the same published surface and test tree (`docs/` is image-only and is not text-scanned) | English-only source rule |
 
 **Isolated E2E — `test/e2e-tui.mjs`** (requires the OpenCode CLI)
 
@@ -655,7 +664,10 @@ The E2E is fully **non-invasive** to your running OpenCode Desktop:
 - `--standalone` starts a *private* server instead of the background service Desktop uses;
 - `OPENCODE_DB` points at a throwaway DB in `%TEMP%` (your sessions are untouched);
 - `OPENCODE_CONTEXT_INDICATOR_STATE_FILE` points at a throwaway state file in `%TEMP%`
-  — the live `opencode-context-indicator-state.json` is never read or written;
+  - the live `opencode-context-indicator-state.json` is never read or written;
+- `OPENCODE_CONTEXT_INDICATOR_LOG_FILE` does the same for the human-readable
+  `context-breakdown.log` (used by the unit gate, which drives idle/compacted
+  handlers);
 - `OPENCODE_CONFIG_DIR` points at a throwaway global config written by the script
   (plugins: this checkout; `update: "disable"`) **for Check A only** — the load
   source is deterministic and fail-closed instead of following your live config;

@@ -2,10 +2,10 @@
  * prepublish.mjs — fast gate (<30 s) run automatically by `npm publish`.
  *
  * Checks performed:
- *   (a) tarball composition (6 files, no dev/test artifacts)
+ *   (a) tarball composition (base files + lib/ + docs/, no dev/test artifacts)
  *   (b) tui.tsx transpiles with the Solid pragma intact
  *   (c) resolve chain — @opentui/solid + solid-js resolvable from tui.tsx context
- *   (d) unit-harness T1–T28 for the limit/agent/state/command fixes
+ *   (d) unit-harness T1–T29 for the limit/agent/state/command fixes
  *   (e) corporate-identifier scan (8 files)
  *   (f) non-English scan — no non-ASCII letters (any language other than
  *       English) anywhere in the published surface or the test tree
@@ -38,16 +38,18 @@ console.log("\n(a) Tarball composition...");
 const pkgMeta = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8"));
 const declaredFiles = pkgMeta.files || [];
 // Expand any directory-wildcard entries to their expected member(s).
-// e.g. "lib/" -> every regular file under lib/; "subdir/" -> all members under
-// that prefix. We only expect "lib/" here. The base published set is
-// LICENSE, README.md, index.js, package.json, tui.tsx (5 files); the lib/
-// member count is computed from the directory so the index.js module split is
-// reflected automatically instead of needing a hardcoded number.
+// e.g. "lib/" -> every regular file under lib/; "docs/" -> every member under
+// that prefix (the README screenshot). The base published set is
+// LICENSE, README.md, index.js, package.json, tui.tsx (5 files); the lib/ and
+// docs/ member counts are computed from the directories so module splits and
+// added screenshots are reflected automatically instead of needing a hardcoded
+// number.
 // Base files in `files[]` outside lib/ (index.js, package.json, tui.tsx,
 // README.md, CHANGELOG.md, LICENSE).
 const BASE_MEMBER_COUNT = 6;
 const fileMembers = new Set(["LICENSE","README.md","index.js","package.json","tui.tsx"]);
 let libMemberCount = 0;
+let docsMemberCount = 0;
 declaredFiles.forEach((f) => {
   if (f === "lib/") {
     const libAbs = join(repoRoot, "lib");
@@ -60,12 +62,32 @@ declaredFiles.forEach((f) => {
         libMemberCount++;
       }
     }
+  } else if (f === "docs/") {
+    const docsAbs = join(repoRoot, "docs");
+    if (!existsSync(docsAbs)) {
+      fatal(`package.json declares "docs/" but ${docsAbs} is missing`);
+    }
+    for (const ent of readdirSync(docsAbs, { withFileTypes: true })) {
+      // Directories and symlinks are rejected, not skipped: `npm pack` would
+      // still copy their contents while the depth-1 member count stayed valid,
+      // so a nested draft/log/env file would ride along unnoticed.
+      if (!ent.isFile()) {
+        fatal(`unexpected non-file entry in docs/: ${ent.name}`);
+      }
+      // Allowlist, not an open wildcard: docs/ ships byte-for-byte to npm, so
+      // a stray draft/log/env file must fail the gate instead of riding along.
+      if (!/\.(png|jpe?g|gif|webp|svg)$/i.test(ent.name)) {
+        fatal(`unexpected non-image file in docs/: ${ent.name}`);
+      }
+      fileMembers.add(`docs/${ent.name}`);
+      docsMemberCount++;
+    }
   } else if (!f.endsWith("/")) {
     fileMembers.add(f);
   }
-  // directory wildcards other than "lib/" are not used in this repo.
+  // Other directory wildcards are not used in this repo.
 });
-const expectedMembers = BASE_MEMBER_COUNT + libMemberCount;
+const expectedMembers = BASE_MEMBER_COUNT + libMemberCount + docsMemberCount;
 if (fileMembers.size !== expectedMembers) {
   fatal(`expected ${expectedMembers} tarball members, got ${fileMembers.size}: ${[...fileMembers].join(", ")}`);
 }
@@ -314,6 +336,9 @@ const seedState = {
 
 writeFileSync(HARNESS_STATE, JSON.stringify(seedState), "utf8");
 process.env.OPENCODE_CONTEXT_INDICATOR_STATE_FILE = HARNESS_STATE;
+// Same isolation for the human-readable log: idle/compacted handlers rewrite
+// it, so point them at a throwaway file instead of the user's real one.
+process.env.OPENCODE_CONTEXT_INDICATOR_LOG_FILE = join(tmpdir(), "oci-prepublish-log.log");
 
 const mod  = await import(pathToFileURL(join(repoRoot, "index.js")).href);
 const read = () => JSON.parse(readFileSync(HARNESS_STATE, "utf8"));
@@ -1476,8 +1501,69 @@ check("T28d diff: a null category renders n/a, not a fake gain", () => {
   assert(diff.includes("| system | n/a | 5 | n/a |"), diff);
 });
 
+// T29 — a finishing subagent must not disappear from the parent's live roll-up
+// (regression: session.idle wiped sessionParentCache/sessionTotals for the
+// child, so every idle child dropped the parent's "subagents N session(s)" to
+// zero until the parent's own idle swept the set).
+const t29Ctx = {
+  session: {
+    get: async () => null,
+    context: async () => null,
+  },
+};
+// handleV2Event's lifecycle branches (created / step.ended / idle) run fully
+// synchronously before their first await, so the assertions can stay sync.
+check("T29 subagent roll-up survives a child idle, swept by the parent idle", () => {
+  const { sessionParentCache, sessionTotals } = cacheMod;
+  sessionParentCache.delete("ses_KID");
+  sessionParentCache.delete("ses_ROOTKID");
+  sessionTotals.delete("ses_KID");
+
+  void mod.handleV2Event(t29Ctx, { type: "session.created", data: { sessionID: "ses_ROOTKID" } });
+  void mod.handleV2Event(t29Ctx, {
+    type: "session.created",
+    data: { sessionID: "ses_KID", parentID: "ses_ROOTKID" },
+  });
+  void mod.handleV2Event(t29Ctx, {
+    type: "session.step.ended",
+    data: { sessionID: "ses_KID", tokens: { input: 300, output: 20, reasoning: 5 } },
+  });
+  assert(sessionTotals.get("ses_KID")?.input === 300, "child totals accumulated");
+
+  void mod.handleV2Event(t29Ctx, { type: "session.idle", data: { sessionID: "ses_KID" } });
+  assert(
+    sessionParentCache.get("ses_KID") === "ses_ROOTKID",
+    "child attribution survives the child's own idle",
+  );
+  assert(sessionTotals.get("ses_KID")?.input === 300, "child totals survive the child's own idle");
+  assert(!mod.lastKnownInputCache.has("ses_KID"), "per-session last-known caches are still wiped");
+
+  // Grand-child: only a recursive sweep can collect it once the child is gone.
+  void mod.handleV2Event(t29Ctx, {
+    type: "session.created",
+    data: { sessionID: "ses_GRANDKID", parentID: "ses_KID" },
+  });
+  void mod.handleV2Event(t29Ctx, { type: "session.deleted", data: { sessionID: "ses_KID" } });
+  assert(!sessionParentCache.has("ses_GRANDKID"), "deleting a child sweeps its sub-subagents");
+  assert(!sessionParentCache.has("ses_KID"), "the deleted child is gone");
+
+  // Re-seed a child + grandchild for the parent-idle sweep.
+  void mod.handleV2Event(t29Ctx, {
+    type: "session.created",
+    data: { sessionID: "ses_KID2", parentID: "ses_ROOTKID" },
+  });
+  void mod.handleV2Event(t29Ctx, {
+    type: "session.created",
+    data: { sessionID: "ses_GRANDKID2", parentID: "ses_KID2" },
+  });
+  void mod.handleV2Event(t29Ctx, { type: "session.idle", data: { sessionID: "ses_ROOTKID" } });
+  assert(!sessionParentCache.has("ses_KID2"), "parent idle sweeps the child attribution");
+  assert(!sessionTotals.has("ses_KID2"), "parent idle sweeps the child totals");
+  assert(!sessionParentCache.has("ses_GRANDKID2"), "parent idle sweeps grandchildren too");
+});
+
 if (failed) fatal(`${failed} unit test(s) failed`);
-pass(`all ${ranChecks} unit checks passed (T1–T12 + T13–T28)`);
+pass(`all ${ranChecks} unit checks passed (T1-T12 + T13-T29)`);
 
 // ---------------------------------------------------------------------------
 // (e) corporate-identifier scan — no employer/vendor-specific names may appear
@@ -1545,7 +1631,8 @@ if (nonEnglishHits.length) {
 }
 pass(`no non-ASCII letters in ${scanFiles.length} scanned files`);
 
-// Cleanup isolated harness state file only — never the live state.json.
+// Cleanup the isolated harness files only — never the live state.json/log.
 try { unlinkSync(HARNESS_STATE); } catch { /* ok */ }
+try { unlinkSync(join(tmpdir(), "oci-prepublish-log.log")); } catch { /* ok */ }
 
 console.log("\n[prepublish OK] All gates passed.\n");
