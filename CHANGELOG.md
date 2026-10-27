@@ -4,6 +4,29 @@ Notable user-facing changes per release. Dates are commit days (UTC).
 The package also ships a dual V1/V2 plugin — see the README for the surface
 matrix; everything below concerns the V2 path unless stated otherwise.
 
+## 1.6.0 — 2026-10-27
+
+Host alignment release: opencode 2.2.0 moved TUI plugins to OpenTUI 0.7.
+
+- **OpenTUI 0.7.0.** `@opencode/plugin` 2.2.0 declares `@opentui/core` and
+  `@opentui/solid` **0.7.0** as peers, and the host release notes state that a
+  plugin left on OpenTUI 0.6 no longer installs against it (upstream wording;
+  this repo's gates only ever run against the current host). The pinned direct
+  dependency is now `@opentui/solid@0.7.0` (dev pins `@opentui/core@0.7.0` and
+  `@opencode/plugin@2.2.0`). None of the 0.7 breaking changes apply to this
+  plugin: it renders intrinsic OpenTUI elements and registers slots, and defines
+  no custom renderables, native integrations or `nativeSceneWorkBudget` options.
+- **Host support.** The server-only V2 path is unchanged and still targets
+  opencode 2.0.16+. The TUI module now ships compiled against OpenTUI 0.7, so
+  the sidebar and the `/cx` panel require **opencode ≥ 2.2.0** and cannot load on
+  an older host. Older-host installation was not re-verified for this release.
+- **Compaction ceiling unchanged.** `calculateCeiling()` in 2.2.0 is identical
+  to 2.1.x, so the `0.15 / 16k / 32k` reserve formula and every `%` denominator
+  are unaffected. (2.2.0 changed how a *compaction request* is sized - measured
+  prompt instead of characters - not the trigger.)
+- Dev: `drift-watch` is green again (host 2.2.0, OpenTUI 0.7.0); `tsc`,
+  `prepublish` and the isolated e2e pass against the 2.2.0 CLI.
+
 ## 1.5.4 — 2026-10-27
 
 Fix-and-hygiene release after a full-project review. No new commands.

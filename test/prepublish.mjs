@@ -695,7 +695,7 @@ check("T15a exportFileName: id8 truncation", () => {
 });
 
 check("T16 new formula: window 200000 -> usable 170000 reserve 30000", () => {
-  // 200000 >= 32000, so reserve = max(30000, 16000) = 30000 (core 2.1.4: 15%)
+  // 200000 >= 32000, so reserve = max(30000, 16000) = 30000 (core: 15%)
   assert(mod.getUsableContext("test-provider","model-gamma")?.usable === 170000, "window=200000: usable should be 170000");
   assert(mod.getUsableContext("test-provider","model-gamma")?.reserved === 30000, "reserve should be 30000");
 });
@@ -1330,7 +1330,7 @@ check("T25c compaction hook: cold last-known cache does not clobber ctx (no writ
 
 const cacheMod = await import(pathToFileURL(join(repoRoot, "lib", "cache.js")).href);
 
-check("T26 reserve formula mirrors opencode 2.1.4 (0.15 share, 16k floor, 32k gate)", () => {
+check("T26 reserve formula mirrors opencode calculateCeiling (0.15 share, 16k floor, 32k gate)", () => {
   const cases = [
     [200000, 30000],
     [524288, 78643],

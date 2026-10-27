@@ -127,7 +127,8 @@
  *
  *   - Metric: the native opencode overflow count — tokens.total when present,
  *     else input + output + cache.read + cache.write — compared against the
- *     model's compaction ceiling (opencode 2.1.4 calculateCeiling): window =
+ *     model's compaction ceiling (opencode calculateCeiling, unchanged since
+ *     2.1.4): window =
   *     limit.input || limit.context, reserve = max(15% of window, 16k when
   *     window >= 32k), usable = window - reserve. Percentages are NOT
   *     clamped at 100% - exceeding the ceiling must stay visible.
