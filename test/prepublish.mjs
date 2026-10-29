@@ -2,13 +2,14 @@
  * prepublish.mjs — fast gate (<30 s) run automatically by `npm publish`.
  *
  * Checks performed:
- *   (a) tarball composition (base files + lib/ + docs/, no dev/test artifacts)
+ *   (a) tarball composition (base files + lib/ + docs/ + dist/, no dev artifacts)
  *   (b) tui.tsx transpiles with the Solid pragma intact
- *   (c) resolve chain — @opentui/solid + solid-js resolvable from tui.tsx context
- *   (d) unit-harness T1–T29 for the limit/agent/state/command fixes
- *   (e) corporate-identifier scan (8 files)
- *   (f) non-English scan — no non-ASCII letters (any language other than
+ *   (c) resolve chain - @opentui/solid + solid-js resolvable from tui.tsx context
+ *   (d) unit-harness T1-T35 for the limit/agent/state/command/Desktop-RPC fixes
+ *   (e) corporate-identifier scan (lib/, gui/, test/ and the published surface)
+ *   (f) non-English scan - no non-ASCII letters (any language other than
  *       English) anywhere in the published surface or the test tree
+ *   (g) Desktop GUI bundle: one CJS file, app-provided modules kept external
  *
  * Skip with:  npm publish --ignore-scripts
  *             (useful for testing the pack output without running checks)
@@ -40,7 +41,8 @@ const declaredFiles = pkgMeta.files || [];
 // Expand any directory-wildcard entries to their expected member(s).
 // e.g. "lib/" -> every regular file under lib/; "docs/" -> every member under
 // that prefix (the README screenshot). The base published set is
-// LICENSE, README.md, index.js, package.json, tui.tsx (5 files); the lib/ and
+// LICENSE, README.md, index.js, package.json, tui.tsx, CHANGELOG.md (6 files);
+// the lib/ and
 // docs/ member counts are computed from the directories so module splits and
 // added screenshots are reflected automatically instead of needing a hardcoded
 // number.
@@ -50,6 +52,10 @@ const BASE_MEMBER_COUNT = 6;
 const fileMembers = new Set(["LICENSE","README.md","index.js","package.json","tui.tsx"]);
 let libMemberCount = 0;
 let docsMemberCount = 0;
+let distMemberCount = 0;
+// Never part of the package: OS metadata a file manager leaves in the build
+// output directory.
+const DIST_METADATA = new Set([".DS_Store", "Thumbs.db", "desktop.ini"]);
 declaredFiles.forEach((f) => {
   if (f === "lib/") {
     const libAbs = join(repoRoot, "lib");
@@ -82,12 +88,37 @@ declaredFiles.forEach((f) => {
       fileMembers.add(`docs/${ent.name}`);
       docsMemberCount++;
     }
+  } else if (f === "dist/") {
+    // The Desktop GUI bundle: a built artifact, so the directory is expanded by
+    // an explicit allowlist. A missing bundle (fresh checkout without
+    // `npm run build:gui`) and any stray file both fail loudly - a published
+    // package without ./gui-experimental would make the export point at nothing.
+    const distAbs = join(repoRoot, "dist");
+    if (!existsSync(distAbs)) {
+      fatal(`package.json declares "dist/" but ${distAbs} is missing - run: npm run build:gui`);
+    }
+    for (const ent of readdirSync(distAbs, { withFileTypes: true })) {
+      if (!ent.isFile()) fatal(`unexpected non-file entry in dist/: ${ent.name}`);
+      // OS metadata can land in a generated directory without anyone noticing
+      // (Finder's .DS_Store, Explorer's Thumbs.db/desktop.ini). It is not ours
+      // to ship, and npm would happily pack it, so it is ignored rather than
+      // failing a release on a stray file the build did not create.
+      if (DIST_METADATA.has(ent.name)) continue;
+      if (ent.name !== "gui-experimental.cjs") {
+        fatal(`unexpected file in dist/: ${ent.name} (only the GUI bundle belongs there)`);
+      }
+      fileMembers.add(`dist/${ent.name}`);
+      distMemberCount++;
+    }
+    if (distMemberCount === 0) {
+      fatal(`dist/ has no gui-experimental.cjs - run: npm run build:gui`);
+    }
   } else if (!f.endsWith("/")) {
     fileMembers.add(f);
   }
   // Other directory wildcards are not used in this repo.
 });
-const expectedMembers = BASE_MEMBER_COUNT + libMemberCount + docsMemberCount;
+const expectedMembers = BASE_MEMBER_COUNT + libMemberCount + docsMemberCount + distMemberCount;
 if (fileMembers.size !== expectedMembers) {
   fatal(`expected ${expectedMembers} tarball members, got ${fileMembers.size}: ${[...fileMembers].join(", ")}`);
 }
@@ -96,6 +127,20 @@ const bad = [...fileMembers].filter(
          f.includes("tsconfig") || f.includes(".git"),
 );
 if (bad.length) fatal(`package.json files includes dev/test artifacts: ${bad.join(", ")}`);
+
+// Every published export must point at a file that is actually packed. An
+// export target outside `files[]` stays in the tarball only by luck (or not at
+// all) and then resolves to nothing for consumers, without any npm warning.
+const exportTargets = Object.values(pkgMeta.exports || {})
+  .flatMap((value) =>
+    typeof value === "string" ? [value] : Object.values(value || {}),
+  )
+  .filter((value) => typeof value === "string")
+  .map((value) => value.replace(/^\.\//, ""));
+const missingExports = exportTargets.filter((t) => !fileMembers.has(t));
+if (missingExports.length) {
+  fatal(`package.json exports target unpacked files: ${missingExports.join(", ")}`);
+}
 pass(`tarball: ${[...fileMembers].join(", ")} (${fileMembers.size} members, no dev artifacts)`);
 
 // ---------------------------------------------------------------------------
@@ -198,15 +243,19 @@ console.log("\n(d) Unit harness T1–T12 + T13+...");
 const HARNESS_STATE = join(tmpdir(), "oci-prepublish-state.json");
 
 // Seed data — must yield >= 4 valid model-limit entries for T1.
-// NOTE: seed usable/limit are the OLD persisted values used by hydrateModelLimitsFromState.
-// The new formula derives usable = window - reserve, so the seed usable must NOT exceed
-// the NEW formula ceiling. All entries here are designed so new usable <= seed limit.
+// NOTE: seed usable/limit are OLD persisted values (some written when core used
+// a 15% reserve). hydrateModelLimitsFromState() only reads `limit` and re-derives
+// the ceiling with the CURRENT formula, so a seed is accepted when its
+// `usable <= limit` (otherwise the entry is dropped, see ses_T11); the derived
+// usable is then window - reserve with reserve = max(10% of window, 16k when
+// window >= 32k).
 const seedState = {
   ses_MAIN: {
     sessionID:"ses_MAIN",parentID:null,role:"main",agent:"orchestrator",
     model:"model-alpha",providerID:"test-provider",ctx:279312,input:279000,
     usable:445645,limit:524288,reasoning:0,
-    // new formula: window=524288, reserve=max(78643,16000)=78643, usable=445645
+    // persisted value only: a cold write inherits it; a live lookup re-derives
+    // window=524288, reserve=max(52428,16000)=52428, usable=471860
     categories:{user:1000,assistant:1000,reasoning:0,toolArgs:0,system:1000,toolSchemas:1000,other:1000},
     updatedAt:"2026-09-29T18:51:54.013Z",
   },
@@ -214,7 +263,7 @@ const seedState = {
     sessionID:"ses_OLDAGENT",parentID:"ses_MAIN",role:"sub",agent:"code_critic",
     model:"model-beta",providerID:"test-provider",ctx:60950,input:60000,
     usable:891290,limit:1048576,reasoning:0,
-    // new formula: window=1048576, reserve=max(157286,16000)=157286, usable=891290
+    // derived ceiling: window=1048576, reserve=104857, usable=943719
     categories:{user:100,assistant:100,reasoning:0,toolArgs:0,system:null,toolSchemas:null,other:100},
     updatedAt:"2026-09-29T17:25:10.535Z",
   },
@@ -222,7 +271,7 @@ const seedState = {
     sessionID:"ses_T7",parentID:null,role:"main",agent:null,
     model:"model-gamma",providerID:"test-provider",ctx:50000,input:50000,
     usable:170000,limit:200000,reasoning:0,
-    // new formula: window=200000, reserve=max(30000,16000)=30000, usable=170000
+    // derived ceiling: window=200000, reserve=max(20000,16000)=20000, usable=180000
     categories:{user:100,assistant:100,reasoning:0,toolArgs:0,system:100,toolSchemas:100,other:100},
     updatedAt:"2026-09-29T18:00:00.000Z",
   },
@@ -230,7 +279,7 @@ const seedState = {
     sessionID:"ses_T8",parentID:null,role:"main",agent:null,
     model:"model-theta",providerID:"provA",ctx:10,input:10,
     usable:189,limit:222,reasoning:0,
-    // new formula: window=222, reserve=max(33,0)=33, usable=189
+    // derived ceiling: window=222, reserve=max(22,0)=22, usable=200
     categories:{user:1,assistant:1,reasoning:0,toolArgs:0,system:1,toolSchemas:1,other:1},
     updatedAt:"2026-09-29T18:00:00.000Z",
   },
@@ -238,7 +287,7 @@ const seedState = {
     sessionID:"ses_T9_OLD",parentID:null,role:"main",agent:null,
     model:"model-delta",providerID:"test-provider",ctx:1,input:1,
     usable:170000,limit:200000,reasoning:0,
-    // new formula: window=200000, usable=170000 (stays, not filtered)
+    // derived ceiling: window=200000, reserve=20000, usable=180000 (seed stays)
     categories:{user:1,assistant:1,reasoning:0,toolArgs:0,system:1,toolSchemas:1,other:1},
     updatedAt:"2026-09-29T10:00:00.000Z",
   },
@@ -246,7 +295,7 @@ const seedState = {
     sessionID:"ses_T9_NEW",parentID:null,role:"main",agent:null,
     model:"model-delta",providerID:"test-provider",ctx:1,input:1,
     usable:891290,limit:1048576,reasoning:0,
-    // new formula: window=1048576, usable=891290 (stays, freshest wins via updatedAt)
+    // derived ceiling: window=1048576, reserve=104857, usable=943719 (freshest wins)
     categories:{user:1,assistant:1,reasoning:0,toolArgs:0,system:1,toolSchemas:1,other:1},
     updatedAt:"2026-09-29T18:00:00.000Z",
   },
@@ -254,7 +303,7 @@ const seedState = {
     sessionID:"ses_T10_A",parentID:null,role:"main",agent:null,
     model:"model-epsilon",providerID:"test-provider",ctx:1,input:1,
     usable:170000,limit:200000,reasoning:0,
-    // new formula: window=200000, usable=170000 (stays)
+    // derived ceiling: window=200000, reserve=20000, usable=180000 (seed stays)
     categories:{user:1,assistant:1,reasoning:0,toolArgs:0,system:1,toolSchemas:1,other:1},
     updatedAt:"2026-09-29T10:00:00.000Z",
   },
@@ -262,7 +311,7 @@ const seedState = {
     sessionID:"ses_T10_B",parentID:null,role:"main",agent:null,
     model:"model-epsilon",providerID:"test-provider",ctx:1,input:1,
     usable:170000,limit:200000,reasoning:0,
-    // new formula: window=200000, usable=170000 (freshest via updatedAt)
+    // derived ceiling: window=200000, reserve=20000, usable=180000 (freshest)
     categories:{user:1,assistant:1,reasoning:0,toolArgs:0,system:1,toolSchemas:1,other:1},
     updatedAt:"2026-09-29T18:00:00.000Z",
   },
@@ -270,7 +319,7 @@ const seedState = {
     sessionID:"ses_T11",parentID:null,role:"main",agent:null,
     model:"model-zeta",providerID:"test-provider",ctx:1,input:1,
     usable:300000,limit:200000,reasoning:0,
-    // new formula: usable > limit => filtered (T11 unchanged)
+    // derived ceiling: window=200000, usable=180000; seed 300000 > limit -> filtered
     categories:{user:1,assistant:1,reasoning:0,toolArgs:0,system:1,toolSchemas:1,other:1},
     updatedAt:"2026-09-29T18:00:00.000Z",
   },
@@ -278,7 +327,7 @@ const seedState = {
     sessionID:"ses_T12",parentID:null,role:"main",agent:null,
     model:"model-eta",providerID:"test-provider",ctx:1,input:1,
     usable:425000,limit:500000,reasoning:0,
-    // new formula: window=500000, reserve=75000, usable=425000 (seed usable valid, <= limit)
+    // derived ceiling: window=500000, reserve=50000, usable=450000 (seed <= limit)
     categories:{user:1,assistant:1,reasoning:0,toolArgs:0,system:1,toolSchemas:1,other:1},
     updatedAt:"2026-09-29T18:00:00.000Z",
   },
@@ -287,7 +336,7 @@ const seedState = {
     sessionID:"ses_EXT_A",parentID:null,role:"main",agent:"code_critic",
     model:"Claude-3.5-Sonnet",providerID:"anthropic",ctx:200000,input:199000,
     usable:170000,limit:200000,reasoning:0,
-    // new formula: window=200000, usable=170000 (matches seed)
+    // derived ceiling: window=200000, reserve=20000, usable=180000
     categories:{user:1,assistant:1,reasoning:0,toolArgs:0,system:1,toolSchemas:1,other:1},
     updatedAt:"2026-09-29T12:00:00.000Z",
   },
@@ -295,7 +344,7 @@ const seedState = {
     sessionID:"ses_EXT_B",parentID:null,role:"main",agent:null,
     model:"gemini-2.5-Pro",providerID:"google",ctx:1048576,input:1048000,
     usable:891290,limit:1048576,reasoning:0,
-    // new formula: window=1048576, usable=891290 (matches seed)
+    // derived ceiling: window=1048576, reserve=104857, usable=943719
     categories:{user:1,assistant:1,reasoning:0,toolArgs:0,system:1,toolSchemas:1,other:1},
     updatedAt:"2026-09-29T15:30:00.000Z",
   },
@@ -384,7 +433,8 @@ const e2 = quietErr(() => mod.writeStateFile("ses_MAIN","model-alpha","test-prov
 check("T2 writeStateFile preserves usable/limit/agent (cold)", () => {
   assert(e2.length === 0);
   const e = read().ses_MAIN;
-  // NEW formula: seed context=524288, reserve=max(78643,16000)=78643, usable=445645
+  // modelLimits is empty here, so the denominator is INHERITED from the seeded
+  // entry (same model as prev): usable=445645, limit=524288, agent kept.
   assert(e.ctx === 279312 && e.usable === 445645 && e.limit === 524288 && e.agent === "orchestrator");
 });
 
@@ -405,22 +455,22 @@ const state1 = read();
 const repMain = await mod.collectSessionReport(mockCtx,"ses_MAIN",state1,Date.now()+2000);
 const rowMain = mod.renderSessionRow(repMain, true);
 check("T4 main row keeps the % (denominator from state)", () => {
-  // NEW formula: usable=445645; ctx=279312; pct=279312/445645=63%
-  assert(repMain.usable === 445645);
+  // Derived: usable=471860; ctx=279312; pct=279312/471860=59%
+  assert(repMain.usable === 471860);
   assert(rowMain.startsWith("| main |"));
-  assert(rowMain.includes("(63%)"), rowMain);
+  assert(rowMain.includes("(59%)"), rowMain);
 });
 
 // T4b
 const sumText = mod.shortSummaryText(repMain);
 const sumDesc = mod.shortSummaryDescription(repMain);
 check("T4b /context summary shows denominator + % + compact-at", () => {
-  // ctx=279312, usable=445645, pct=63%, reserve=max(78643,16000)=78643
-  assert(sumText.includes("/ 445.6k (63%)"), sumText.split("\n")[0]);
-  assert(sumText.includes("compact at 445.6k"), sumText);
-  // fmt(78643) = "78.6k"
-  assert(sumText.includes("(78.6k reserve)"), sumText);
-  assert(sumDesc.includes("(63%)"), sumDesc);
+  // ctx=279312, usable=471860, pct=59%, reserve=max(52428,16000)=52428
+  assert(sumText.includes("/ 471.9k (59%)"), sumText.split("\n")[0]);
+  assert(sumText.includes("compact at 471.9k"), sumText);
+  // fmt(52428) = "52.4k"
+  assert(sumText.includes("(52.4k reserve)"), sumText);
+  assert(sumDesc.includes("(59%)"), sumDesc);
 });
 
 // T5
@@ -450,12 +500,12 @@ capture(() => mod.hydrateModelLimitsFromState());
 const state2 = read();
 const repT7 = await mod.collectSessionReport(mockCtx,"ses_T7",state2,Date.now()+2000);
 check("T7 denominator == entry.limit window (new formula, not old usable-as-window)", () => {
-  // Seed: limit=200000, usable=170000. New formula: window=200000, reserve=max(30000,16000)=30000, usable=170000
-  // (The old formula would have double-reserved; new formula re-derives correctly)
-  assert(mod.getUsableContext("test-provider","model-gamma")?.usable === 170000);
-  assert(repT7.usable === 170000, `got ${repT7.usable}`);
-  // reserve should be 30000 (15% of 200000, which exceeds 16000)
-  assert(mod.getUsableContext("test-provider","model-gamma")?.reserved === 30000);
+  // Seed: limit=200000, usable=170000. Derived: window=200000, reserve=max(20000,16000)=20000, usable=180000
+  // (The old formula would have double-reserved; the derived ceiling ignores the seed usable)
+  assert(mod.getUsableContext("test-provider","model-gamma")?.usable === 180000);
+  assert(repT7.usable === 180000, `got ${repT7.usable}`);
+  // reserve should be 20000 (10% of 200000, which exceeds 16000)
+  assert(mod.getUsableContext("test-provider","model-gamma")?.reserved === 20000);
 });
 
 // T8
@@ -471,8 +521,8 @@ check("T8 provider change does not inherit usable/limit", () => {
 mod.modelLimits.clear();
 const cap9 = capture(() => mod.hydrateModelLimitsFromState());
 check("T9 stale 170k vs fresh 891290 -> freshest wins", () => {
-  // new formula: window=1048576, reserve=max(157286,16000)=157286, usable=891290
-  assert(mod.getUsableContext("test-provider","model-delta")?.usable === 891290);
+  // derived: window=1048576, reserve=max(104857,16000)=104857, usable=943719
+  assert(mod.getUsableContext("test-provider","model-delta")?.usable === 943719);
   assert(cap9.logs.some((l)=>l.includes("model-delta")&&l.includes("891290")));
   assert(cap9.errs.some((l)=>l.includes("spread")&&l.includes("model-delta")));
 });
@@ -480,9 +530,9 @@ check("T9 stale 170k vs fresh 891290 -> freshest wins", () => {
 // T10
 mod.modelLimits.clear();
 const cap10 = capture(() => mod.hydrateModelLimitsFromState());
-check("T10 uniform candidates -> 170k, no spread warning", () => {
-  // new formula: window=200000, usable=170000
-  assert(mod.getUsableContext("test-provider","model-epsilon")?.usable === 170000);
+check("T10 uniform candidates -> 180k, no spread warning", () => {
+  // derived: window=200000, reserve=20000, usable=180000
+  assert(mod.getUsableContext("test-provider","model-epsilon")?.usable === 180000);
   assert(!cap10.errs.some((l)=>l.includes("model-epsilon")));
 });
 
@@ -498,8 +548,8 @@ check("T11 usable > limit is dropped", () => {
 mod.modelLimits.clear();
 const cap12 = capture(() => mod.hydrateModelLimitsFromState());
 check("T12 usable < limit is LEGITIMATE, seeded", () => {
-  // new formula: window=500000, reserve=75000, usable=425000 (seed usable <= limit)
-  assert(mod.getUsableContext("test-provider","model-eta")?.usable === 425000);
+  // derived: window=500000, reserve=50000, usable=450000 (seed usable <= limit)
+  assert(mod.getUsableContext("test-provider","model-eta")?.usable === 450000);
   assert(cap12.logs.some((l)=>l.includes("model-eta")&&l.includes("425000")));
 });
 
@@ -694,55 +744,55 @@ check("T15a exportFileName: id8 truncation", () => {
   assert(!name.includes("averylongsessionidstringhere"), "full session id leaked");
 });
 
-check("T16 new formula: window 200000 -> usable 170000 reserve 30000", () => {
-  // 200000 >= 32000, so reserve = max(30000, 16000) = 30000 (core: 15%)
-  assert(mod.getUsableContext("test-provider","model-gamma")?.usable === 170000, "window=200000: usable should be 170000");
-  assert(mod.getUsableContext("test-provider","model-gamma")?.reserved === 30000, "reserve should be 30000");
+check("T16 reserve: window 200000 -> usable 180000 reserve 20000", () => {
+  // 200000 >= 32000, so reserve = max(20000, 16000) = 20000 (core 2.2.x: 10%)
+  assert(mod.getUsableContext("test-provider","model-gamma")?.usable === 180000, "window=200000: usable should be 180000");
+  assert(mod.getUsableContext("test-provider","model-gamma")?.reserved === 20000, "reserve should be 20000");
 });
 
-check("T16a new formula: window 100000 -> reserve 16000 (min beats 15%)", () => {
-  // floor(100000 * 0.15) = 15000 < 16000 -> RESERVE_MIN wins
+check("T16a reserve: window 100000 -> reserve 16000 (min beats 10%)", () => {
+  // floor(100000 * 0.10) = 10000 < 16000 -> RESERVE_MIN wins
   const r = mod.reserveFor(100000, undefined);
   assert(r === 16000, `window=100000: reserve should be 16000, got ${r}`);
 });
 
-check("T16b new formula: window 24000 -> reserve 3600", () => {
-  // 24000 < 2 * RESERVE_MIN, so no floor: floor(24000 * 0.15) = 3600
+check("T16b reserve: window 24000 -> reserve 2400", () => {
+  // 24000 < 2 * RESERVE_MIN, so no floor: floor(24000 * 0.10) = 2400
   const r = mod.reserveFor(24000, undefined);
-  assert(r === 3600, `window=24000: reserve should be 3600, got ${r}`);
+  assert(r === 2400, `window=24000: reserve should be 2400, got ${r}`);
 });
 
-check("T16c new formula: window 30000 -> reserve 4500", () => {
-  // 30000 < 32000, so no floor: floor(30000 * 0.15) = 4500
+check("T16c reserve: window 30000 -> reserve 3000", () => {
+  // 30000 < 32000, so no floor: floor(30000 * 0.10) = 3000
   const r = mod.reserveFor(30000, undefined);
-  assert(r === 4500, `window=30000: reserve should be 4500, got ${r}`);
+  assert(r === 3000, `window=30000: reserve should be 3000, got ${r}`);
 });
 
-check("T16c2 new formula: window 32000 -> reserve 16000 (threshold)", () => {
+check("T16c2 reserve: window 32000 -> reserve 16000 (threshold)", () => {
   // 32000 === 2 * RESERVE_MIN -> floor = RESERVE_MIN
   assert(mod.reserveFor(32000, undefined) === 16000);
-  assert(mod.reserveFor(31999, undefined) === 4799);
+  assert(mod.reserveFor(31999, undefined) === 3199);
 });
 
-check("T16d new formula: input preferred over context", () => {
-  // reserveFor(120000) = max(18000, 16000) = 18000
+check("T16d reserve: 10% share never exceeds the floor on a big window", () => {
+  // reserveFor(120000) = max(12000, 16000) = 16000
   const r = mod.reserveFor(120000, undefined);
-  assert(r === 18000, `window=120000: reserve should be 18000, got ${r}`);
+  assert(r === 16000, `window=120000: reserve should be 16000, got ${r}`);
   assert(mod.getUsableContext("test-provider","model-gamma")?.limit === 200000, "window is the seeded context");
 });
 
-check("T16e new formula: unknown limits -> null", () => {
+check("T16e reserve: unknown limits -> null", () => {
   assert(mod.getUsableContext("nonexistent-provider","nonexistent-model") == null);
 });
 
-check("T16f new formula: hydrated seed no double-reserve", () => {
+check("T16f reserve: hydrated seed no double-reserve", () => {
   // Seed ses_T7: usable=170000, limit=200000.
-  // The seed is re-derived from the raw window: 200000 - 30000 = 170000.
+  // The seed is re-derived from the raw window: 200000 - 20000 = 180000.
   mod.modelLimits.clear();
   capture(() => mod.hydrateModelLimitsFromState());
   const info = mod.getUsableContext("test-provider","model-gamma");
-  assert(info?.usable === 170000, `hydrated usable should be 170000, got ${info?.usable}`);
-  assert(info?.reserved === 30000, `hydrated reserve should be 30000, got ${info?.reserved}`);
+  assert(info?.usable === 180000, `hydrated usable should be 180000, got ${info?.usable}`);
+  assert(info?.reserved === 20000, `hydrated reserve should be 20000, got ${info?.reserved}`);
 });
 
 check("T16g reserveFor: bufferOverride takes precedence", () => {
@@ -752,13 +802,13 @@ check("T16g reserveFor: bufferOverride takes precedence", () => {
 
 check("T16h reserveFor: invalid bufferOverride falls through to formula", () => {
   const r1 = mod.reserveFor(200000, -1);
-  assert(r1 === 30000, `negative bufferOverride should be ignored, got ${r1}`);
+  assert(r1 === 20000, `negative bufferOverride should be ignored, got ${r1}`);
   const r2 = mod.reserveFor(200000, 1e10);
-  assert(r2 === 30000, `>1e9 bufferOverride should be ignored, got ${r2}`);
+  assert(r2 === 20000, `>1e9 bufferOverride should be ignored, got ${r2}`);
   const r3 = mod.reserveFor(200000, NaN);
-  assert(r3 === 30000, `NaN bufferOverride should be ignored, got ${r3}`);
+  assert(r3 === 20000, `NaN bufferOverride should be ignored, got ${r3}`);
   const r4 = mod.reserveFor(200000, "not a number");
-  assert(r4 === 30000, `string bufferOverride should be ignored, got ${r4}`);
+  assert(r4 === 20000, `string bufferOverride should be ignored, got ${r4}`);
   // Valid: 0 is accepted (zero reserve), and any value < window is honored.
   assert(mod.reserveFor(200000, 0) === 0);
   assert(mod.reserveFor(200000, 199999) === 199999);
@@ -766,15 +816,15 @@ check("T16h reserveFor: invalid bufferOverride falls through to formula", () => 
 
 check("T16h2 reserveFor: buffer >= window is ignored (core semantics)", () => {
   // A buffer configured for a larger model must not leave zero room.
-  assert(mod.reserveFor(200000, 200000) === 30000);
-  assert(mod.reserveFor(200000, 250000) === 30000);
+  assert(mod.reserveFor(200000, 200000) === 20000);
+  assert(mod.reserveFor(200000, 250000) === 20000);
   assert(mod.reserveFor(50000, 50000) === 16000);
   // getUsableContext must apply the same guard to the env override.
   const prev = process.env.OPENCODE_CONTEXT_INDICATOR_COMPACT_BUFFER;
   process.env.OPENCODE_CONTEXT_INDICATOR_COMPACT_BUFFER = "250000";
   try {
     const info = mod.getUsableContext("test-provider", "model-gamma");
-    assert(info?.usable === 170000, `ignored oversized env buffer, got ${info?.usable}`);
+    assert(info?.usable === 180000, `ignored oversized env buffer, got ${info?.usable}`);
   } finally {
     if (prev === undefined) delete process.env.OPENCODE_CONTEXT_INDICATOR_COMPACT_BUFFER;
     else process.env.OPENCODE_CONTEXT_INDICATOR_COMPACT_BUFFER = prev;
@@ -1320,25 +1370,90 @@ const t25cErr = quietErr(() => mod.onV2Compaction({
   system: [], tools: {}, model: { id: "model-alpha", providerID: "test-provider" },
 }));
 const t25c = read().ses_T25E;
+// The hook armed nothing (it wrote nothing), so the trailing event MUST be the
+// fallback: without this, a cold-cache hook made a compaction leave no trace at
+// all ("after compaction nothing happens").
+await mod.handleV2Event(mockCtx, {
+  type: "session.compacted",
+  id: "evt25e",
+  data: { sessionID: "ses_T25E" },
+});
+const t25cAfterEvent = read().ses_T25E;
 check("T25c compaction hook: cold last-known cache does not clobber ctx (no write)", () => {
   assert(t25cErr.length === 0, `no errors: ${t25cErr.join(" | ")}`);
   assert(t25c.ctx === 5000, `ctx preserved, got ${t25c.ctx}`);
   assert(t25c.compactStale === false && !t25c.compactedAt, "no stale mark when nothing was measured");
+  assert(
+    t25cAfterEvent.compactStale === true && !!t25cAfterEvent.compactedAt,
+    "the trailing session.compacted event must still mark the entry stale",
+  );
+});
+
+// T25d — the arming guard itself: the compaction hook fires on EVERY instance
+// but its state write can legitimately FAIL (another instance holds the state
+// lock, an unsafe key, a failed rename). In that case the hook persisted
+// nothing, so the trailing `session.compacted` event must still do the fallback
+// write. Simulated by holding the state lock across the hook call — the only
+// way to make writeStateFile return false while ctxTokens > 0.
+mod.writeStateFile("ses_T25F", "model-alpha", "test-provider", 4000, 4000, 0);
+// The compaction hook reads the LAST-KNOWN counters, not state.json: seed them,
+// otherwise `ctxTokens === 0` skips the whole write block and the guard under
+// test is never reached (the test would then pass for the wrong reason).
+mod.lastKnownCtxCache.set("ses_T25F", 4000);
+mod.lastKnownInputCache.set("ses_T25F", 4000);
+const t25dLockFile = `${HARNESS_STATE}.lock`;
+writeFileSync(t25dLockFile, "held-by-peer", "utf8");
+const t25dErr = quietErr(() => mod.onV2Compaction({
+  sessionID: "ses_T25F",
+  messages: [
+    { role: "user", content: [{ type: "text", text: "u".repeat(60) }] },
+    { role: "assistant", content: [{ type: "text", text: "a".repeat(60) }] },
+  ],
+  system: [], tools: {}, model: { id: "model-alpha", providerID: "test-provider" },
+}));
+const t25dBlocked = read().ses_T25F;
+try { unlinkSync(t25dLockFile); } catch { /* already gone */ }
+await mod.handleV2Event(mockCtx, {
+  type: "session.compacted",
+  id: "evt25f",
+  data: { sessionID: "ses_T25F" },
+});
+const t25dAfterEvent = read().ses_T25F;
+check("T25d compaction hook that could not persist does not arm the guard", () => {
+  // The busy lock is EXPECTED (that is the whole point) - the write path logs it.
+  // Anything else captured here means an unexpected failure path.
+  assert(
+    t25dErr.every((m) => m.includes("lock busy")),
+    `only the busy-lock message is expected: ${t25dErr.join(" | ")}`,
+  );
+  assert(
+    t25dErr.length > 0,
+    "the state write was expected to be refused (lock held by a peer)",
+  );
+  assert(
+    t25dBlocked.ctx === 4000 && t25dBlocked.compactStale === false,
+    `busy lock: entry untouched, got ctx=${t25dBlocked.ctx} stale=${t25dBlocked.compactStale}`,
+  );
+  assert(
+    t25dAfterEvent.compactStale === true && !!t25dAfterEvent.compactedAt,
+    "the event fallback must still record the compaction (no silent no-op)",
+  );
 });
 
 // ---- T26-T28: compaction reserve, top consumers, /context-diff ----
 
 const cacheMod = await import(pathToFileURL(join(repoRoot, "lib", "cache.js")).href);
 
-check("T26 reserve formula mirrors opencode calculateCeiling (0.15 share, 16k floor, 32k gate)", () => {
+check("T26 reserve mirrors core 2.2.x calculateCeiling (10% share, 16k floor, 32k gate)", () => {
   const cases = [
-    [200000, 30000],
-    [524288, 78643],
-    [1048576, 157286],
-    [100000, 16000],
-    [32000, 16000],
-    [31999, 4799],
-    [1000, 150],
+    [200000, 20000], // 10% share wins; the pre-2.2 15% share would give 30000
+    [524288, 52428],
+    [1048576, 104857],
+    [100000, 16000], // 10% = 10000 < floor
+    [32000, 16000], // 2 * RESERVE_MIN gate: floor applies exactly here
+    [160000, 16000], // tie: 10% share == the 16k floor
+    [31999, 3199], // one below the gate: share only, no floor
+    [1000, 100], // tiny window: share only
     [1, 0],
   ];
   for (const [win, want] of cases) {
@@ -1562,8 +1677,689 @@ check("T29 subagent roll-up survives a child idle, swept by the parent idle", ()
   assert(!sessionParentCache.has("ses_GRANDKID2"), "parent idle sweeps grandchildren too");
 });
 
+// T30 - the Desktop RPC wire row must match on all three sides: the JSON Schema
+// the GUI validates against (lib/rpc.js), the key list that schema exports, and
+// the object the server builds (lib/desktop.js toDesktopRow). This check owns a
+// LITERAL key list on purpose: comparing the schema with DESKTOP_ROW_KEYS alone
+// would be a tautology (both come from the same object), and a field added only
+// to the schema or only to the builder would silently arrive as undefined in
+// the panel.
+const DESKTOP_ROW_KEYS_EXPECTED = [
+  "agent", "assistant", "ctx", "input", "modelID", "other", "parentID",
+  "providerID", "reasoning", "reserve", "sessionID", "source", "stale",
+  "system", "toolArgs", "toolOut", "toolSchemas", "updatedAt", "usable", "user",
+].sort();
+const rpcMod = await import(pathToFileURL(join(repoRoot, "lib", "rpc.js")).href);
+check("T30 desktop RPC row schema matches the server row builder", () => {
+  const schema =
+    rpcMod.DesktopContextRpc.methods.family.output.properties.rows.items;
+  const schemaKeys = Object.keys(schema.properties).sort();
+  assert(
+    schemaKeys.join(",") === DESKTOP_ROW_KEYS_EXPECTED.join(","),
+    `schema keys drifted: ${schemaKeys.join(",")} vs expected ${DESKTOP_ROW_KEYS_EXPECTED.join(",")}`,
+  );
+  assert(
+    [...rpcMod.DESKTOP_ROW_KEYS].sort().join(",") === schemaKeys.join(","),
+    "DESKTOP_ROW_KEYS must list exactly the schema properties",
+  );
+  assert(
+    schema.required.slice().sort().join(",") === schemaKeys.join(","),
+    "every row property must be required",
+  );
+  const row = mod.toDesktopRow({
+    sessionID: "ses_DESKTOP",
+    parentID: null,
+    agent: null,
+    modelID: "model-alpha",
+    providerID: "test-provider",
+    ctxTokens: 10,
+    inputTokens: 9,
+    usable: null,
+    reserve: null,
+    categories: { user: 3 },
+    source: "snapshot",
+    updatedAt: null,
+    compactStale: undefined,
+  });
+  assert(
+    Object.keys(row).sort().join(",") === schemaKeys.join(","),
+    `builder/schema key mismatch: ${Object.keys(row).sort().join(",")}`,
+  );
+  assert(row.parentID === "" && row.agent === "", "absent ids flatten to empty strings");
+  assert(row.usable === 0 && row.reserve === 0, "unknown windows flatten to 0");
+  assert(row.assistant === 0 && row.other === 0, "absent categories flatten to 0");
+  assert(row.updatedAt === "" && row.stale === false, "absent time / stale flag flatten");
+  assert(row.user === 3 && row.ctx === 10, "present values survive");
+});
+
+// T31 - the Desktop data path registers and answers. This is the wiring the GUI
+// depends on: registerDesktopRpc -> collectFamilyReports -> toDesktopRow. The
+// host itself cannot be exercised here, so the check drives the handler with a
+// fake plugin context and a seeded state file (the harness's isolated one).
+const t31Seed = { ...mod.readStateSnapshot() };
+const t31Entry = (id, parentID, ctxTokens, agent) => ({
+  sessionID: id,
+  parentID,
+  role: parentID ? "sub" : "primary",
+  agent,
+  model: "model-alpha",
+  providerID: "test-provider",
+  ctx: ctxTokens,
+  input: ctxTokens,
+  usable: 84000,
+  reserve: 16000,
+  categories: {
+    user: 40,
+    assistant: 20,
+    reasoning: 10,
+    toolArgs: 5,
+    toolOut: 3,
+    system: 30,
+    toolSchemas: 25,
+    other: 1,
+  },
+  updatedAt: new Date().toISOString(),
+});
+t31Seed.ses_GUIROOT = t31Entry("ses_GUIROOT", undefined, 2000, null);
+t31Seed.ses_GUIKID = t31Entry("ses_GUIKID", "ses_GUIROOT", 800, "explore");
+writeFileSync(HARNESS_STATE, JSON.stringify(t31Seed));
+
+const t31Rpc = { handlers: null, definition: null };
+// Live lookups are counted so a regression back to "session.get() on every
+// poll" cannot pass: the Desktop panel polls this path.
+const t31Live = { get: 0, context: 0 };
+await mod.registerDesktopRpc({
+  rpc: {
+    register: async (definition, handlers) => {
+      t31Rpc.definition = definition;
+      t31Rpc.handlers = handlers;
+      return { dispose: async () => {} };
+    },
+  },
+  session: {
+    get: async () => {
+      t31Live.get++;
+      return null;
+    },
+    context: async () => {
+      t31Live.context++;
+      return null;
+    },
+  },
+});
+const t31Answer = await t31Rpc.handlers.family({ sessionID: "ses_GUIROOT" });
+const t31LiveFirst = t31Live.get + t31Live.context;
+const t31Poll = await t31Rpc.handlers.family({ sessionID: "ses_GUIROOT" });
+const t31LiveSecond = t31Live.get + t31Live.context - t31LiveFirst;
+const t31Empty = await t31Rpc.handlers.family({});
+// A session this plugin has never measured must not come back as a row of
+// zeros: the GUI turns an empty list into "No measurement yet".
+const t31Unknown = await t31Rpc.handlers.family({ sessionID: "ses_NEVERSEEN" });
+check("T31 desktop RPC registers and answers with the session family", () => {
+  assert(t31Rpc.definition?.id === "context-indicator", "contract id");
+  assert(typeof t31Rpc.handlers.family === "function", "family handler registered");
+  assert(t31Answer.rows.length === 2, `expected 2 rows, got ${t31Answer.rows.length}`);
+  const [rootRow, kidRow] = t31Answer.rows;
+  assert(rootRow.sessionID === "ses_GUIROOT", "root row first");
+  assert(rootRow.parentID === "", "root has no parent id");
+  assert(kidRow.sessionID === "ses_GUIKID", "child row follows");
+  assert(kidRow.parentID === "ses_GUIROOT", "child keeps its parent link");
+  assert(kidRow.agent === "explore", "child agent survives");
+  assert(rootRow.user === 40 && rootRow.system === 30, "categories survive");
+  assert(rootRow.usable > 0, "usable window resolved");
+  assert(t31Empty.rows.length === 0, "a missing sessionID answers with no rows");
+  assert(
+    t31Unknown.rows.length === 0,
+    "an unmeasured session answers with no rows, not a zero row",
+  );
+  assert(t31Poll.rows.length === 2, "a repeated poll answers the same family");
+  assert(
+    t31LiveSecond === 0,
+    `a poll must not re-issue live lookups (${t31LiveSecond} call(s) on the second poll)`,
+  );
+});
+
+// T32 - a client-context fallback record (rebuilt from persisted messages: no
+// system prompt, no tool schemas) must never shadow the hook-measured categories
+// in state.json. It used to: a second plugin instance (the Desktop window's,
+// which answers the RPC without ever running the request hook) showed system 0,
+// tool schemas 0 and their whole mass folded into `other`. Hook data still wins.
+const t32State = { ...mod.readStateSnapshot() };
+t32State.ses_SNAPSHOT = {
+  sessionID: "ses_SNAPSHOT",
+  model: "model-alpha",
+  providerID: "test-provider",
+  agent: "orchestrator",
+  ctx: 1000,
+  input: 1000,
+  usable: 84000,
+  categories: {
+    user: 100,
+    assistant: 50,
+    reasoning: 10,
+    toolArgs: 20,
+    toolOut: 30,
+    system: 400,
+    toolSchemas: 200,
+    other: 190,
+  },
+  updatedAt: new Date().toISOString(),
+};
+writeFileSync(HARNESS_STATE, JSON.stringify(t32State));
+const t32Ctx = { session: { get: async () => null, context: async () => null } };
+mod.breakdownCache.set("ses_SNAPSHOT", {
+  userChars: 200,
+  assistantChars: 100,
+  reasoningChars: 20,
+  toolArgsChars: 40,
+  toolOutChars: 60,
+  toolOutByTool: {},
+  systemChars: null,
+  toolSchemasChars: null,
+  reclaim: null,
+  top: [],
+  capturedAt: Date.now(),
+  source: "client-context",
+});
+const t32Fallback = await mod.collectSessionReport(
+  t32Ctx,
+  "ses_SNAPSHOT",
+  t32State,
+  Date.now() + 2000,
+);
+mod.breakdownCache.set("ses_SNAPSHOT", {
+  userChars: 200,
+  assistantChars: 100,
+  reasoningChars: 20,
+  toolArgsChars: 40,
+  toolOutChars: 60,
+  toolOutByTool: {},
+  systemChars: 2000,
+  toolSchemasChars: 1000,
+  reclaim: null,
+  top: [],
+  capturedAt: Date.now(),
+  source: "context-hook",
+});
+const t32Hook = await mod.collectSessionReport(
+  t32Ctx,
+  "ses_SNAPSHOT",
+  t32State,
+  Date.now() + 2000,
+);
+mod.breakdownCache.delete("ses_SNAPSHOT");
+check("T32 client-context fallback never shadows hook-measured categories", () => {
+  assert(
+    t32Fallback.source === "snapshot",
+    `expected the snapshot source, got ${t32Fallback.source}`,
+  );
+  assert(
+    t32Fallback.categories.system === 400 &&
+      t32Fallback.categories.toolSchemas === 200,
+    `system/tool schemas must come from the snapshot, got ${t32Fallback.categories.system}/${t32Fallback.categories.toolSchemas}`,
+  );
+  assert(
+    t32Fallback.categories.other === 190,
+    `other must not be inflated by the fallback, got ${t32Fallback.categories.other}`,
+  );
+  assert(t32Hook.source === "context-hook", `hook source, got ${t32Hook.source}`);
+  assert(
+    t32Hook.categories.system === 2000,
+    `hook categories must still win, got ${t32Hook.categories.system}`,
+  );
+});
+
+// T33 - the SHARED state file is written by several plugin instances. The
+// Desktop window's instance never serves a request, so its breakdown is always
+// the client-context fallback; it used to overwrite the hook-measured categories
+// (two writes landed 11 ms apart in the field), which is what made the panel show
+// "system 0 / tool schemas 0 / other inflated" and could blank user/assistant.
+// It also cleared the post-compaction stale mark without ever measuring the new
+// context. Hook data must own the entry.
+{
+  const t33Id = "ses_T33";
+  mod.breakdownCache.set(t33Id, {
+    userChars: 100,
+    assistantChars: 50,
+    reasoningChars: 10,
+    toolArgsChars: 20,
+    toolOutChars: 30,
+    toolOutByTool: { read: 30 },
+    systemChars: 400,
+    toolSchemasChars: 200,
+    reclaim: null,
+    top: [],
+    capturedAt: Date.now(),
+    source: "context-hook",
+  });
+  mod.writeStateFile(t33Id, "model-alpha", "test-provider", 1000, 1000, 0);
+  const t33Hook = read()[t33Id];
+  // Same session, mirror instance: fallback captured LATER, so a capturedAt
+  // comparison alone would let it win.
+  mod.breakdownCache.set(t33Id, {
+    userChars: 0,
+    assistantChars: 0,
+    reasoningChars: 5,
+    toolArgsChars: 7,
+    toolOutChars: 11,
+    toolOutByTool: { bash: 11 },
+    systemChars: null,
+    toolSchemasChars: null,
+    reclaim: null,
+    top: [],
+    capturedAt: Date.now() + 5000,
+    source: "client-context",
+  });
+  mod.writeStateFile(t33Id, "model-alpha", "test-provider", 1000, 1000, 0);
+  const t33AfterFallback = read()[t33Id];
+  // Compaction mark, then ANOTHER fallback write: the stale badge must survive.
+  mod.writeStateFile(t33Id, "model-alpha", "test-provider", 1000, 1000, 0, {
+    compacted: true,
+  });
+  mod.writeStateFile(t33Id, "model-alpha", "test-provider", 1000, 1000, 0);
+  const t33Stale = read()[t33Id];
+  // A session no hook ever measured keeps the fallback numbers (better than none).
+  const t33FallbackOnly = "ses_T33F";
+  mod.breakdownCache.set(t33FallbackOnly, {
+    userChars: 20,
+    assistantChars: 10,
+    reasoningChars: 0,
+    toolArgsChars: 0,
+    toolOutChars: 0,
+    toolOutByTool: {},
+    systemChars: null,
+    toolSchemasChars: null,
+    reclaim: null,
+    top: [],
+    capturedAt: Date.now(),
+    source: "client-context",
+  });
+  mod.writeStateFile(t33FallbackOnly, "model-alpha", "test-provider", 500, 500, 0);
+  const t33Only = read()[t33FallbackOnly];
+  mod.breakdownCache.delete(t33Id);
+  mod.breakdownCache.delete(t33FallbackOnly);
+  check("T33 client-context write never clobbers hook categories or the stale mark", () => {
+    assert(t33Hook.source === "context-hook", `hook source, got ${t33Hook.source}`);
+    assert(
+      t33AfterFallback.categories.user === 100 &&
+        t33AfterFallback.categories.assistant === 50 &&
+        t33AfterFallback.categories.system === 400 &&
+        t33AfterFallback.categories.toolSchemas === 200 &&
+        t33AfterFallback.categories.toolOut === 30,
+      `hook categories must survive the fallback write, got ${JSON.stringify(t33AfterFallback.categories)}`,
+    );
+    assert(
+      t33AfterFallback.categories.other === 190,
+      `other must stay 1000-810=190, got ${t33AfterFallback.categories.other}`,
+    );
+    assert(
+      t33AfterFallback.source === "context-hook",
+      `source must stay context-hook, got ${t33AfterFallback.source}`,
+    );
+    assert(
+      t33Stale.compactStale === true,
+      "a fallback write must not clear the post-compaction stale mark",
+    );
+    assert(
+      t33Only.categories.user === 20 && t33Only.source === "client-context",
+      `fallback-only session keeps its own numbers, got ${JSON.stringify(t33Only.categories)}/${t33Only.source}`,
+    );
+  });
+}
+
+// T34 - the log file is shared but `finalSummaries` is per-process: a snapshot
+// rewrite from a different instance used to drop the notes the others had just
+// appended (a compaction was recorded in state.json while its COMPACTION note
+// vanished from the log). The persisted section must be merged, once.
+{
+  const stateMod = await import(
+    pathToFileURL(join(repoRoot, "lib", "state.js")).href
+  );
+  const logPath = join(tmpdir(), "oci-prepublish-log.log");
+  const oldNote = "[2026-01-01T00:00:00.000Z] COMPACTED session=ses_T34 (auto)";
+  writeFileSync(
+    logPath,
+    [
+      "# context-breakdown.log",
+      "",
+      "## live snapshot",
+      "stale line",
+      "",
+      "## final summaries",
+      oldNote,
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  stateMod.writeLog(["[new] live snapshot line"]);
+  const afterFirst = readFileSync(logPath, "utf8");
+  stateMod.writeLog(["[new] live snapshot line"]);
+  const afterSecond = readFileSync(logPath, "utf8");
+  check("T34 final summaries merge across instances (no wipe, no duplicates)", () => {
+    assert(afterFirst.includes(oldNote), "persisted summary line was wiped");
+    assert(afterFirst.includes("[new] live snapshot line"), "live snapshot not written");
+    assert(
+      afterSecond.split(oldNote).length - 1 === 1,
+      "merged summary line is duplicated",
+    );
+  });
+}
+
+// T35 - the hook-vs-fallback authority rule must cover every hook-family
+// source, not just the V2 context hook: the compaction hook measures the SAME
+// request payload (system prompt + tool schemas), the V1 transform hooks do too,
+// and a legacy entry written before `source` existed is provable by a non-null
+// system / tool-schema estimate. The live log must also print the hook-measured
+// state.json entry when THIS instance has no cache entry at all (or only a
+// fallback one) instead of a fallback-shaped snapshot.
+{
+  const v2Mod = await import(pathToFileURL(join(repoRoot, "lib", "v2.js")).href);
+  const estimateMod = await import(
+    pathToFileURL(join(repoRoot, "lib", "estimate.js")).href
+  );
+  // The authority set itself: only a source that measured the assembled payload
+  // may own the categories. "fallback" (V1 session.messages) and
+  // "client-context" (V2) are rebuilds and must never win.
+  const hookSources = [
+    "context-hook",
+    "compaction-hook",
+    "transform",
+    "system-transform",
+  ];
+  const nonHookSources = ["fallback", "client-context", "snapshot", null, ""];
+  check("T35 isHookSource classifies the authority set", () => {
+    for (const s of hookSources) {
+      assert(estimateMod.isHookSource(s), `${s} must be hook-family`);
+    }
+    for (const s of nonHookSources) {
+      assert(!estimateMod.isHookSource(s), `${String(s)} must not be hook-family`);
+    }
+  });
+
+  // (1) compaction-hook owns the categories over a later fallback write.
+  const t35Id = "ses_T35";
+  mod.breakdownCache.set(t35Id, {
+    userChars: 120,
+    assistantChars: 60,
+    reasoningChars: 10,
+    toolArgsChars: 20,
+    toolOutChars: 40,
+    toolOutByTool: { read: 40 },
+    systemChars: 300,
+    toolSchemasChars: 100,
+    reclaim: null,
+    top: [],
+    capturedAt: Date.now(),
+    source: "compaction-hook",
+  });
+  mod.writeStateFile(t35Id, "model-alpha", "test-provider", 900, 900, 0);
+  mod.breakdownCache.set(t35Id, {
+    userChars: 0,
+    assistantChars: 0,
+    reasoningChars: 0,
+    toolArgsChars: 0,
+    toolOutChars: 0,
+    toolOutByTool: {},
+    systemChars: null,
+    toolSchemasChars: null,
+    reclaim: null,
+    top: [],
+    capturedAt: Date.now() + 5000,
+    source: "client-context",
+  });
+  mod.writeStateFile(t35Id, "model-alpha", "test-provider", 900, 900, 0);
+  const t35Comp = read()[t35Id];
+
+  // (2) V1 transform is hook-family as well.
+  const t35V1 = "ses_T35V1";
+  mod.breakdownCache.set(t35V1, {
+    userChars: 70,
+    assistantChars: 30,
+    reasoningChars: 0,
+    toolArgsChars: 10,
+    toolOutChars: 5,
+    toolOutByTool: {},
+    systemChars: 250,
+    toolSchemasChars: null,
+    reclaim: null,
+    top: [],
+    capturedAt: Date.now(),
+    source: "transform",
+  });
+  mod.writeStateFile(t35V1, "model-alpha", "test-provider", 800, 800, 0);
+  mod.breakdownCache.set(t35V1, {
+    userChars: 0,
+    assistantChars: 0,
+    reasoningChars: 0,
+    toolArgsChars: 0,
+    toolOutChars: 0,
+    toolOutByTool: {},
+    systemChars: null,
+    toolSchemasChars: null,
+    reclaim: null,
+    top: [],
+    capturedAt: Date.now() + 5000,
+    source: "client-context",
+  });
+  mod.writeStateFile(t35V1, "model-alpha", "test-provider", 800, 800, 0);
+  const t35V1After = read()[t35V1];
+  // Restore a hook-shaped cache entry (slightly different user count) so the log
+  // test can prove the cache is printed as-is, not the state snapshot.
+  mod.breakdownCache.set(t35V1, {
+    userChars: 71,
+    assistantChars: 30,
+    reasoningChars: 0,
+    toolArgsChars: 10,
+    toolOutChars: 5,
+    toolOutByTool: {},
+    systemChars: 250,
+    toolSchemasChars: null,
+    reclaim: null,
+    top: [],
+    capturedAt: Date.now(),
+    source: "transform",
+  });
+
+  // (3) legacy entry: no `source`, but a hook-only system estimate.
+  const t35Legacy = "ses_T35L";
+  const t35LegacyEntry = {
+    sessionID: t35Legacy,
+    parentID: null,
+    role: "main",
+    agent: null,
+    model: "model-alpha",
+    providerID: "test-provider",
+    ctx: 700,
+    input: 700,
+    usable: 1000,
+    reserve: 100,
+    limit: 1000,
+    reasoning: 0,
+    categories: {
+      user: 90,
+      assistant: 40,
+      reasoning: 0,
+      toolArgs: 10,
+      toolOut: 0,
+      system: 180,
+      toolSchemas: 60,
+      other: 320,
+    },
+    updatedAt: new Date().toISOString(),
+  };
+  {
+    const all = read();
+    all[t35Legacy] = t35LegacyEntry;
+    writeFileSync(HARNESS_STATE, JSON.stringify(all), "utf8");
+  }
+  mod.breakdownCache.set(t35Legacy, {
+    userChars: 0,
+    assistantChars: 0,
+    reasoningChars: 0,
+    toolArgsChars: 0,
+    toolOutChars: 0,
+    toolOutByTool: {},
+    systemChars: null,
+    toolSchemasChars: null,
+    reclaim: null,
+    top: [],
+    capturedAt: Date.now() + 5000,
+    source: "client-context",
+  });
+  mod.writeStateFile(t35Legacy, "model-alpha", "test-provider", 700, 700, 0);
+  const t35LegacyAfter = read()[t35Legacy];
+  mod.breakdownCache.delete(t35Legacy);
+
+  // (4) live log: a fallback cache entry (or none) is replaced by the
+  // hook-measured state.json entry; a hook cache entry is printed as-is.
+  mod.breakdownCache.set(t35Id, {
+    userChars: 0,
+    assistantChars: 0,
+    reasoningChars: 0,
+    toolArgsChars: 0,
+    toolOutChars: 0,
+    toolOutByTool: {},
+    systemChars: null,
+    toolSchemasChars: null,
+    reclaim: null,
+    top: [],
+    capturedAt: Date.now(),
+    source: "client-context",
+  });
+  const t35LogFallback = v2Mod
+    .buildLiveLinesV2(t35Id, "model-alpha", "test-provider", 0, 900, 0)
+    .join("\n");
+  mod.breakdownCache.delete(t35Id);
+  const t35LogEmpty = v2Mod
+    .buildLiveLinesV2(t35Id, "model-alpha", "test-provider", 0, 900, 0)
+    .join("\n");
+  const t35LogHook = v2Mod
+    .buildLiveLinesV2(t35V1, "model-alpha", "test-provider", 800, 800, 0)
+    .join("\n");
+  mod.breakdownCache.delete(t35V1);
+
+  check("T35 hook-family authority: compaction-hook, V1 transform, legacy entries", () => {
+    assert(
+      t35Comp.categories.system === 300 &&
+        t35Comp.categories.toolSchemas === 100 &&
+        t35Comp.categories.user === 120 &&
+        t35Comp.source === "compaction-hook",
+      `compaction-hook categories must survive a fallback write, got ${JSON.stringify(t35Comp.categories)}/${t35Comp.source}`,
+    );
+    assert(
+      t35V1After.categories.system === 250 &&
+        t35V1After.categories.user === 70 &&
+        t35V1After.source === "transform",
+      `V1 transform entry must survive a fallback write, got ${JSON.stringify(t35V1After.categories)}/${t35V1After.source}`,
+    );
+    // NOTE: `system`/`toolSchemas` alone would also pass on a regression - the
+    // writer inherits null-ish fields from prevEntry. `user` (a fallback-owned
+    // category) and the persisted `source` are the discriminating assertions.
+    assert(
+      t35LegacyAfter.categories.user === 90,
+      `legacy hook-measured entry must not be blanked, got ${JSON.stringify(t35LegacyAfter.categories)}`,
+    );
+    assert(
+      t35LegacyAfter.categories.system === 180 &&
+        t35LegacyAfter.categories.toolSchemas === 60 &&
+        t35LegacyAfter.source === "context-hook",
+      `legacy entry must be re-tagged as hook-measured, got ${JSON.stringify(t35LegacyAfter.categories)}/${t35LegacyAfter.source}`,
+    );
+  });
+
+  check("T35 live log prefers the hook-measured state entry over a fallback", () => {
+    for (const [label, text] of [
+      ["client-context cache", t35LogFallback],
+      ["no cache entry", t35LogEmpty],
+    ]) {
+      assert(
+        text.includes("system      300 (est tokens)"),
+        `${label}: system must come from state.json, got:\n${text}`,
+      );
+      assert(
+        text.includes("user        120 (est tokens)"),
+        `${label}: user must come from state.json, got:\n${text}`,
+      );
+      assert(
+        text.includes("source      compaction-hook"),
+        `${label}: source tag must be the hook one, got:\n${text}`,
+      );
+      // The residual must be the HOOK's (900 - 650 = 250), not recomputed
+      // against this instance's input (0 here, i.e. a mirror that never saw the
+      // request: recomputation would print 0). The header counters must come
+      // from the same snapshot, otherwise "other = input - sum" contradicts
+      // `input=0` right above it.
+      assert(
+        text.includes("other       250"),
+        `${label}: residual must come from the state entry, got:\n${text}`,
+      );
+      assert(
+        text.includes("input=900 snapshot="),
+        `${label}: header must borrow the snapshot counters, got:\n${text}`,
+      );
+    }
+    assert(
+      t35LogHook.includes("system      250 (est tokens)") &&
+        t35LogHook.includes("user        71 (est tokens)"),
+      `a hook cache entry must be printed as-is, got:\n${t35LogHook}`,
+    );
+  });
+
+  // (5) the V1 hooks themselves, not just the classifier: system.transform on
+  // top of a `fallback` cache record must re-tag the entry as hook-family (the
+  // M1 regression - a fallback tag with a non-null system estimate would let the
+  // next fallback overwrite the hook numbers).
+  const v1Mod = await import(pathToFileURL(join(repoRoot, "lib", "v1.js")).href);
+  const t35V1HookId = "ses_T35V1H";
+  mod.breakdownCache.set(t35V1HookId, {
+    userChars: 50,
+    assistantChars: 20,
+    reasoningChars: 0,
+    toolArgsChars: 0,
+    toolOutChars: 0,
+    toolOutByTool: {},
+    systemChars: null,
+    toolSchemasChars: null,
+    reclaim: null,
+    top: [],
+    capturedAt: Date.now() - 1000,
+    source: "fallback",
+  });
+  const t35V1Plugin = v1Mod.makeV1({
+    config: { providers: async () => [] },
+  });
+  t35V1Plugin["experimental.chat.system.transform"](
+    { sessionID: t35V1HookId },
+    { system: ["s".repeat(400)] },
+  );
+  const t35V1HookEntry = mod.breakdownCache.get(t35V1HookId);
+
+  check("T35 V1 system.transform re-tags a fallback record as hook-family", () => {
+    assert(
+      t35V1HookEntry.source === "system-transform",
+      `source must be hook-family, got ${t35V1HookEntry.source}`,
+    );
+    assert(
+      typeof t35V1HookEntry.systemChars === "number" &&
+        t35V1HookEntry.systemChars > 0,
+      `system estimate must be recorded, got ${t35V1HookEntry.systemChars}`,
+    );
+    assert(
+      t35V1HookEntry.userChars === 50,
+      `the fallback categories must be preserved, got ${t35V1HookEntry.userChars}`,
+    );
+    assert(
+      estimateMod.isHookMeasuredEntry({
+        categories: { system: t35V1HookEntry.systemChars },
+        source: t35V1HookEntry.source,
+      }) === true,
+      "the merged record must be hook-measured (a later fallback cannot overwrite it)",
+    );
+  });
+}
+
 if (failed) fatal(`${failed} unit test(s) failed`);
-pass(`all ${ranChecks} unit checks passed (T1-T12 + T13-T29)`);
+pass(`all ${ranChecks} unit checks passed (T1-T12 + T13-T35)`);
 
 // ---------------------------------------------------------------------------
 // (e) corporate-identifier scan — no employer/vendor-specific names may appear
@@ -1576,8 +2372,16 @@ const FORBIDDEN = new RegExp(
   ["la" + "nit", "d" + "ks", "deep" + "seek"].join("|"),
   "i",
 );
-const scanFiles = ["index.js", "tui.tsx", "README.md", "package.json", "CHANGELOG.md"];
-for (const dir of ["lib", "test"]) {
+const scanFiles = [
+  "index.js",
+  "tui.tsx",
+  "README.md",
+  "package.json",
+  "CHANGELOG.md",
+  "vite.gui.config.mjs",
+  "tsconfig.gui.json",
+];
+for (const dir of ["lib", "test", "gui"]) {
   const abs = join(repoRoot, dir);
   if (!existsSync(abs)) continue;
   for (const ent of readdirSync(abs, { withFileTypes: true })) {
@@ -1631,8 +2435,71 @@ if (nonEnglishHits.length) {
 }
 pass(`no non-ASCII letters in ${scanFiles.length} scanned files`);
 
+// ---------------------------------------------------------------------------
+// (g) Desktop GUI bundle (./gui-experimental)
+//
+// The app loads ONE prebuilt CommonJS file and provides solid-js, the GUI SDK,
+// the client, Effect and Electron/Node built-ins itself. Bundling any of them
+// (or a second copy of Solid) desynchronises the app's instances, and a bare
+// `opencode`/`@opentui` import cannot resolve at all in the window. The Vite
+// preset already fails the build for most of these; this gate re-checks the
+// artifact that actually ships, because the bundle is a build output that can
+// go stale, be hand-edited, or be produced by a different config.
+// ---------------------------------------------------------------------------
+console.log("\n(g) Desktop GUI bundle...");
+{
+  const bundleRel = "dist/gui-experimental.cjs";
+  const bundleAbs = join(repoRoot, bundleRel);
+  if (!existsSync(bundleAbs)) {
+    fatal(`${bundleRel} is missing - run: npm run build:gui`);
+  }
+  const bundle = readFileSync(bundleAbs, "utf8");
+  if (bundle.length < 4000) {
+    fatal(`${bundleRel} looks truncated (${bundle.length} bytes) - rebuild it`);
+  }
+  // CommonJS, single file: no ESM import statements, no dynamic import left.
+  if (/^\s*import\s/m.test(bundle)) {
+    fatal(`${bundleRel} still contains ESM import statements - not a CJS bundle`);
+  }
+  if (/\bimport\s*\(/.test(bundle)) {
+    fatal(`${bundleRel} contains a dynamic import() - the app loads no second chunk`);
+  }
+  if (!bundle.includes("exports.default")) {
+    fatal(`${bundleRel} has no default export (Plugin.define)`);
+  }
+  // Every module the app provides must stay a require(); a bundled copy would be
+  // a second instance.
+  for (const spec of ["solid-js", "solid-js/web", "@opencode/plugin/gui", "@opencode/plugin/rpc"]) {
+    if (!bundle.includes(`require("${spec}")`)) {
+      fatal(`${bundleRel} does not require the app-provided "${spec}" - bundled copy?`);
+    }
+  }
+  // Modules the window cannot resolve: the TUI renderer and a bare opencode
+  // specifier (also a regression guard for copy-pasted TUI code).
+  for (const [needle, why] of [
+    ["react/jsx-runtime", "React JSX runtime (Solid pragma missing)"],
+    ["@opentui", "OpenTUI (a TUI-only renderer, not available in a window)"],
+  ]) {
+    if (bundle.includes(needle)) fatal(`${bundleRel} contains ${why}`);
+  }
+  if (/["']opencode(\/|["'])/.test(bundle)) {
+    fatal(`${bundleRel} imports a bare 'opencode' specifier - not provided in a window`);
+  }
+  // Node built-ins are only available to the main process, never to a window
+  // render; the bundle must not require them at all (it has no main entry).
+  if (/require\("(node:)?(fs|os|path|url|module|child_process|worker_threads)"\)/.test(bundle)) {
+    fatal(`${bundleRel} requires a Node built-in - a window cannot resolve it`);
+  }
+  pass(
+    `bundle: ${bundleRel} (${(bundle.length / 1024).toFixed(1)} kB, CJS, app-provided externals kept)`,
+  );
+}
+
+
 // Cleanup the isolated harness files only — never the live state.json/log.
 try { unlinkSync(HARNESS_STATE); } catch { /* ok */ }
+try { unlinkSync(`${HARNESS_STATE}.lock`); } catch { /* ok */ }
 try { unlinkSync(join(tmpdir(), "oci-prepublish-log.log")); } catch { /* ok */ }
+try { unlinkSync(join(tmpdir(), "oci-prepublish-log.log.lock")); } catch { /* ok */ }
 
 console.log("\n[prepublish OK] All gates passed.\n");

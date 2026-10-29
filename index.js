@@ -127,10 +127,10 @@
  *
  *   - Metric: the native opencode overflow count — tokens.total when present,
  *     else input + output + cache.read + cache.write — compared against the
- *     model's compaction ceiling (opencode calculateCeiling, unchanged since
- *     2.1.4): window =
-  *     limit.input || limit.context, reserve = max(15% of window, 16k when
-  *     window >= 32k), usable = window - reserve. Percentages are NOT
+ *     model's compaction ceiling (opencode calculateCeiling, core 2.2.x):
+ *     window = limit.input || limit.context, reserve = max(10% of window, 16k
+ *     when window >= 32k), usable = window - reserve (the share was 15% up to
+ *     2.1.x). Percentages are NOT
   *     clamped at 100% - exceeding the ceiling must stay visible.
  *   - Category estimates use a unicode-aware heuristic (see estimateTokens):
  *     Cyrillic ~2.5 chars/token, CJK ~1.5, latin/ASCII ~4. These are ESTIMATES,
@@ -177,7 +177,8 @@ import {
   modelLimits,
   reserveFor,
 } from "./lib/limits.js";
-import { lastKnownCacheRead, lastKnownCacheWrite, lastKnownCtxCache, lastKnownInputCache, lastKnownReasoningCache, sessionAgentCache, sessionParentCache } from "./lib/cache.js";
+import { breakdownCache, lastKnownCacheRead, lastKnownCacheWrite, lastKnownCtxCache, lastKnownInputCache, lastKnownReasoningCache, sessionAgentCache, sessionParentCache } from "./lib/cache.js";
+import { registerDesktopRpc, toDesktopRow } from "./lib/desktop.js";
 import {
   logErr,
   readStateSnapshot,
@@ -229,9 +230,12 @@ export {
   lastKnownCacheRead,
   lastKnownCacheWrite,
   lastKnownCtxCache,
+  breakdownCache,
   lastKnownInputCache,
   lastKnownReasoningCache,
   handleV2Event,
+  registerDesktopRpc,
+  toDesktopRow,
 };
 
 // ---------------------------------------------------------------------------
@@ -336,6 +340,13 @@ export default {
     } catch (err) {
       logErr("v2 command transform registration failed", err);
     }
+
+    // Desktop GUI data channel (experimental GUI plugins, opencode 2.2.0+).
+    // The GUI part ships as ./gui-experimental and calls this contract through
+    // ctx.client.rpc(); without it the panel has no data, so the registration is
+    // non-fatal and the TUI / slash commands keep working either way.
+    const desktopRpc = await registerDesktopRpc(ctx);
+    if (desktopRpc) registrations.push(desktopRpc);
 
     const controller = new AbortController();
     void (async () => {

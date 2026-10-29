@@ -4,6 +4,86 @@ Notable user-facing changes per release. Dates are commit days (UTC).
 The package also ships a dual V1/V2 plugin — see the README for the surface
 matrix; everything below concerns the V2 path unless stated otherwise.
 
+## 1.7.0 — 2026-10-29
+
+Desktop GUI release (experimental): the plugin now has a surface in the
+OpenCode Desktop app, not just in the terminal.
+
+- **Desktop side-panel tab.** A new `./gui-experimental` part contributes a
+  "Context" tab to the session side region: model, `ctx / usable (percent)`, the
+  eight categories as value + bar + share, the measurement time and source tag,
+  a stale-after-compaction marker, the compaction reserve, and one line per
+  subagent with its own window and percentage. Opened from the `+` menu of the
+  side region, the command palette, or the `/cx` slash command.
+- **Composer pill.** A small always-on `NN% ctx` capsule above the composer,
+  amber from 65 % and red from 85 % of the usable window; clicking it opens the
+  tab. It hides itself while the server part is unavailable instead of showing a
+  stale number.
+- **New public RPC contract (`./rpc`).** A Desktop window has no filesystem
+  access, so the panel cannot read `state.json`; the server part now registers
+  an RPC contract (id `context-indicator`, method `family`) that returns the root
+  session plus every descendant as flat rows, and the GUI polls it through
+  `ctx.client.rpc()`. The contract is exported so other plugins and clients can
+  read the same data.
+- **One family walk instead of two.** `/context-breakdown` and the RPC now share
+  `collectFamilyReports()`: the descendant BFS, the shared wall-clock budget and
+  the per-session collection exist once. The RPC uses a 2 s budget (a poll runs
+  far more often than a command).
+- **Experimental warning.** The host GUI API (`@opencode/plugin/gui`) is marked
+  experimental upstream and may change between releases; if it does, the GUI
+  part stops loading while the server part, the slash commands and the TUI
+  surfaces keep working. The Desktop part is not covered by CI (it needs a real
+  window); CI typechecks it, builds the bundle and validates the artifact.
+- **Fixed: hook-measured categories are authoritative in `state.json`.** The
+  file is shared by every plugin instance, and the Desktop window's instance
+  never serves a model request, so its breakdown is always the client-context
+  fallback (no system prompt, no tool schemas). It used to overwrite the
+  hook-measured categories milliseconds after the hook wrote them, which is what
+  made the panel show `system 0` / `tool schemas 0` / a grossly inflated `other`
+  and could blank `user`/`assistant`. Entries now carry their `source`, and only
+  a hook breakdown may replace hook numbers (a fallback still fills a session
+  that no hook has ever measured). The same rule now applies to the command
+  report and to the live log, so all three surfaces agree.
+- **Fixed: the stale-after-compaction mark survives a fallback write.** A
+  conversation rebuilt from the persisted messages is not a measurement of the
+  compacted context; only a fresh hook breakdown clears the mark now, so the
+  panel keeps saying "stale after compaction" instead of silently dropping it.
+  The compaction hook also marks the entry as "already handled" only when it
+  actually persisted a measurement, so a hook instance with a cold cache no
+  longer suppresses the fallback and makes a compaction leave no trace at all.
+- **Fixed: compaction notes could vanish from the log.** `final summaries` lived
+  in per-process memory while the log file is shared, so the next snapshot
+  rewrite from another instance wiped a `COMPACTION`/`COMPACTED` note that had
+  just been appended. The writer now merges the section already on disk
+  (block-level, de-duplicated, bounded) under its own lock, and the live snapshot
+  prints a hook-measured `state.json` entry — categories, residual `other` and
+  its `ctx`/`input` counters, tagged `snapshot=<updatedAt>` — instead of this
+  instance's fallback-shaped view. Repeated compactions of one session are also
+  no longer collapsed into a single note when the host omits the event id.
+- **Reserve share corrected for opencode 2.2.x.** `calculateCeiling()` keeps the
+  same shape but the reserve share dropped from 15 % to 10 % in 2.2.0 (the
+  "fit output limits to the context window" change, PR #51271), so the plugin
+  now mirrors `max(floor(window * 0.10), window >= 32_000 ? 16_000 : 0)`. Every
+  `%` and the `compact at` line are now computed against the host's actual
+  trigger; on a large window the old formula understated the ceiling by ~5 % of
+  the window (~26 k tokens at 512 k). The 1.6.0 note that the ceiling was
+  unchanged in 2.2.0 was wrong — the `2 * RESERVE_MIN` gate did stay.
+- Dev: `lib/format.js` (pure `fmt`/`num`) extracted so the GUI bundle has no
+  `node:*` import; gate (a) now expands `dist/`, gate (e)/(f) scan `gui/` and the
+  GUI build config, new gate (g) validates the built CJS bundle (app-provided
+  modules kept external, no React/OpenTUI/bare-`opencode` import, no Node
+  built-in, no ESM or dynamic import left), new unit checks T30 (schema vs row
+  builder), T31 (RPC registration + handler), T32 (fallback vs hook priority in
+  the report), T33 (fallback vs hook priority in the shared state file, stale
+  mark), T34 (summary merge across instances), T35 (hook-family authority for
+  the compaction hook, the V1 transform hooks and legacy untagged entries, plus
+  the live-log substitution) and T25c/T25d (a cold-cache or lock-refused
+  compaction hook must not arm the trailing-event guard), 85 checks total; CI
+  builds the GUI and typechecks it before the gate. The isolated e2e (plugin
+  load + state write) passes on both the 2.2.0 CLI and the 2.2.1 Desktop CLI;
+  the dev dependency stays pinned to `@opencode/plugin@2.2.0` for CI
+  reproducibility.
+
 ## 1.6.0 — 2026-10-27
 
 Host alignment release: opencode 2.2.0 moved TUI plugins to OpenTUI 0.7.
@@ -20,7 +100,8 @@ Host alignment release: opencode 2.2.0 moved TUI plugins to OpenTUI 0.7.
   opencode 2.0.16+. The TUI module now ships compiled against OpenTUI 0.7, so
   the sidebar and the `/cx` panel require **opencode ≥ 2.2.0** and cannot load on
   an older host. Older-host installation was not re-verified for this release.
-- **Compaction ceiling unchanged.** `calculateCeiling()` in 2.2.0 is identical
+- **Compaction ceiling unchanged (superseded — see 1.7.0).**
+  `calculateCeiling()` in 2.2.0 is identical
   to 2.1.x, so the `0.15 / 16k / 32k` reserve formula and every `%` denominator
   are unaffected. (2.2.0 changed how a *compaction request* is sized - measured
   prompt instead of characters - not the trigger.)
@@ -67,9 +148,10 @@ Fix-and-hygiene release after a full-project review. No new commands.
 
 ## 1.5.3 — 2026-10-26
 
-- **Compaction ceiling aligned with opencode 2.1.4 (#51271).** `lib/limits.js`
+- **Compaction ceiling aligned with opencode 2.1.4.** `lib/limits.js`
   now mirrors `calculateCeiling()` exactly: the reserve is
-  `max(floor(window * 0.15), window >= 2 * 16_000 ? 16_000 : 0)` (was 10%),
+  `max(floor(window * 0.15), window >= 2 * 16_000 ? 16_000 : 0)` (was 10%;
+  the share moved again in 2.2.0 — see 1.7.0),
   and an override buffer is honored **only while it is smaller than the
   window** — a buffer configured for a larger model is ignored instead of
   leaving zero room. The `compact at` line and the `%` denominator now match the

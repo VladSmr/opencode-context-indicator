@@ -33,11 +33,23 @@ jobs:
       # the registry; if typescript is missing, fail loudly instead.
       - run: npx --no-install tsc --noEmit
 
-      # Run the full prepublish gate (a–f): tarball composition, tui.tsx
-      # pragma regression check via the esbuild PROGRAMMATIC API, resolve
+      # Typecheck the Desktop GUI part (gui/*.tsx, solid-js JSX, allowJs over
+      # the plain-JS lib modules it imports).
+      - run: npx --no-install tsc -p tsconfig.gui.json --noEmit
+
+      # Build the Desktop GUI bundle BEFORE the gate: the gate inspects the
+      # artifact that ships (dist/gui-experimental.cjs) and fails when it is
+      # missing, so a build error must be the reported failure, not a missing
+      # file. The bundle is a build output and is not committed.
+      - run: npm run build:gui
+
+      # Run the full prepublish gate (a)-(g): tarball composition (incl. the
+      # built dist/ bundle), the tui.tsx pragma regression check via the
+      # esbuild PROGRAMMATIC API, the resolve
       # chain (host-bridged + peer packages + the local lib import), the
-      # unit harness T1-T28 (74 checks), the corporate-identifier scan and the
-      # non-English (non-ASCII letter) scan.
+      # unit harness T1-T35 (85 checks), the corporate-identifier scan and the
+      # non-English (non-ASCII letter) scan, plus the Desktop GUI bundle check
+      # (one CJS file, app-provided modules kept external).
       # Single source of truth, identical on Windows and Linux: the API
       # spawns the native esbuild binary with correct executable semantics
       # instead of `node <cli-bin>`, which breaks on Linux (ELF vs JS).

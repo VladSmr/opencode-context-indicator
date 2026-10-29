@@ -1,17 +1,20 @@
 {
   "name": "opencode-context-indicator",
-  "version": "1.6.0",
-  "description": "Real-time context-window usage for OpenCode: per-category token breakdown, /context-diff, a zero-LLM /cx panel with per-session cost and a searchable family-session picker, and a TUI sidebar. Dual V1 + V2 plugin entry.",
+  "version": "1.7.0",
+  "description": "Real-time context-window usage for OpenCode: per-category token breakdown, /context-diff, a zero-LLM /cx panel with per-session cost and a searchable family-session picker, a TUI sidebar, and an experimental Desktop panel. Dual V1 + V2 plugin entry.",
   "type": "module",
   "license": "MIT",
   "exports": {
     ".": "./index.js",
-    "./tui": "./tui.tsx"
+    "./tui": "./tui.tsx",
+    "./rpc": "./lib/rpc.js",
+    "./gui-experimental": "./dist/gui-experimental.cjs"
   },
   "files": [
     "index.js",
     "lib/",
     "tui.tsx",
+    "dist/",
     "docs/",
     "README.md",
     "CHANGELOG.md",
@@ -31,7 +34,9 @@
     "breakdown",
     "tui",
     "sidebar",
-    "panel"
+    "panel",
+    "desktop",
+    "gui"
   ],
   "publishConfig": {
     "access": "public"
@@ -71,14 +76,18 @@
     "esbuild": "^0.28.2",
     "node-pty": "^1.1.0",
     "solid-js": "^1.9.12",
-    "typescript": "5.9.3"
+    "typescript": "5.9.3",
+    "vite": "^8.3.5",
+    "vite-plugin-solid": "^2.11.14"
   },
   "scripts": {
+    "build:gui": "vite build --config vite.gui.config.mjs",
+    "test:types": "tsc --noEmit && tsc -p tsconfig.gui.json --noEmit",
     "test:prepublish": "node test/prepublish.mjs",
     "test:e2e": "node test/e2e-tui.mjs --full",
     "test:e2e:quick": "node test/e2e-tui.mjs --quick",
     "test:drift": "node test/drift-watch.mjs",
     "test:drift:strict": "node test/drift-watch.mjs --strict"
   },
-  "prepublishOnly": "node test/prepublish.mjs && node test/e2e-tui.mjs --full"
+  "prepublishOnly": "npm run build:gui && node test/prepublish.mjs && node test/e2e-tui.mjs --full"
 }

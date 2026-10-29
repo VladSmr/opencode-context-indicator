@@ -3,6 +3,10 @@ node_modules/
 *.tgz
 .DS_Store
 
+# Built Desktop GUI bundle: produced by `npm run build:gui` (and by
+# `prepublishOnly`); it is a package artifact, not source.
+dist/
+
 # IDE (IntelliJ IDEA)
 .idea/
 *.iml
