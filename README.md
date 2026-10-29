@@ -32,7 +32,7 @@ re-run against the 2.2.1 and 2.2.2 Desktop CLI); the V1 path against 1.18.29+.
 For every served request the plugin estimates how the context window is split:
 
 ```
-[2026-…] session=ses_abc model=… ctx=45.2k/120k (38%) … input=44.1k
+[2026-…] session=ses_abc model=… ctx=45.2k/120k (37.7%) count=45.2k usable=… limit=… maxOutput=… reserved=… input=44.1k
   user        4.2k (est tokens)
   assistant   3.1k (est tokens)
   reasoning   0.8k (est tokens) (exact 1.2k)
@@ -42,7 +42,7 @@ For every served request the plugin estimates how the context window is split:
   tool schemas 1.4k (est tokens)
   other       5.6k (= input - sum of estimates)
   source      context-hook
-  prompt cache read=12.0k (27% of input) write=1.1k (provider-reported)
+  prompt cache read=12.0k write=1.1k (provider-reported; subset of input)
   reclaim     ~9.8k redundant tool output (3 duplicate(s) — estimate)
   subagents   2 session(s): in=8.1k out=2.3k r=1.0k worst=12%
 ```
@@ -61,7 +61,9 @@ For every served request the plugin estimates how the context window is split:
   `input + output + cache.read + cache.write`. Percentages are **not clamped**
   at 100% — exceeding the window stays visible.
 * `prompt cache` is **provider-reported and exact** (`tokens.cache.read` /
-  `tokens.cache.write`), shown as a share of `input`. It is a *subset* of input,
+  `tokens.cache.write`). The live snapshot prints the raw read/write counts;
+  `/context` and `/context-breakdown` also append the read share of `input`
+  when the provider reported it. It is a *subset* of input,
   so it is deliberately **not** added to the category sum: a cache read means the
   provider served those prompt tokens from its prompt cache, not that they are
   absent from the window. `n/a` when the provider reports nothing.
@@ -127,13 +129,13 @@ commands:
 
 | Command | Scope | Delivery | Agent turn? |
 | --- | --- | --- | :---: |
-| `/context` | **this session only** (no subagents); cache + `state.json` only | `resume:true` — the model echoes the 3-line summary into the transcript | yes |
+| `/context` | **this session only** (no subagents); cache + `state.json` only | `resume:true` - the model echoes the short summary into the transcript | yes |
 | `/context-breakdown` | this session **+ all subagent descendants** | `resume:true` — the model echoes the table into the transcript | yes |
 | `/context-diff` | **this session only**; previous measurement vs current | `resume:true` — the model echoes the delta table into the transcript | yes |
 
 #### `/context` — quick summary (main session only)
 
-A 3-line summary of the current session, built purely from the in-memory cache
+A short summary of the current session, built purely from the in-memory cache
 and the `state.json` snapshot: **no subagent traversal and no live RPC**, so
 collection is instant (delivery itself still runs an agent turn — see below).
 The synthetic notice chip shows a self-contained one-liner (label =
@@ -157,6 +159,7 @@ instructions to follow.
 <context-summary>
 **Context** — your-model · 41.5k / 168k (25%)
 usr 2.3k · asst 285 · rsn 9.6k · tool 2.1k · out 24.7k · sys 8.5k · schm 3.8k · oth 4.1k
+compact at 143k (25.0k reserve)
 updated 12:36:16 (snap)
 </context-summary>
 ```
@@ -266,7 +269,8 @@ the content is visible in the Desktop (the chip only shows `description`).
 `CONTEXT_BREAKDOWN_RESUME` controls `/context-breakdown` back to a plain
 notice if needed.
 
-> **E2E note (Desktop 2.0.19, local model `llama3.2:latest`, `build` agent).**
+> **E2E note (historical run on Desktop 2.0.19, local model `llama3.2:latest`,
+> `build` agent).**
 > `resume:true` behaved as designed: the synthetic item was drained into
 > `/message` and a turn ran; the assistant message contained the table verbatim
 > (the trailing `_…_` note line was dropped by the model). Because `resume:true`
@@ -601,19 +605,21 @@ Add the package name to the `plugin` array in your `opencode.json`:
 Copy `index.js` and the whole `lib/` directory into
 `~/.config/opencode/plugins/`, keeping the `lib/` subdirectory next to the
 plugin file so the plugin's relative imports resolve. The `lib/` folder is
-support code, not a separate plugin entry:
+support code, not a separate plugin entry; copy **every** module in it
+(`cache.js`, `commands.js`, `contributors.js`, `dedup.js`, `desktop.js`,
+`estimate.js`, `format.js`, `limits.js`, `rpc.js`, `state.js`, `tui-data.js`,
+`tui-panel.tsx`, `tui-sidebar.tsx`, `tui-theme.js`, `v1.js`, `v2.js`) — a
+missing module only disables the surface that imports it, but the server part
+stops loading if one of its own imports is absent:
 
 ```
-~/.config/opencode/plugins/context-indicator.js
-~/.config/opencode/plugins/lib/cache.js
-~/.config/opencode/plugins/lib/commands.js
-~/.config/opencode/plugins/lib/dedup.js
-~/.config/opencode/plugins/lib/estimate.js
-~/.config/opencode/plugins/lib/limits.js
-~/.config/opencode/plugins/lib/state.js
-~/.config/opencode/plugins/lib/v1.js
-~/.config/opencode/plugins/lib/v2.js
+~/.config/opencode/plugins/context-indicator.js   (this package's index.js)
+~/.config/opencode/plugins/lib/*.js
+~/.config/opencode/plugins/lib/*.tsx
 ```
+
+`tui.tsx` (the `./tui` entry, at the package root) is only needed for the
+terminal TUI surfaces and is resolved from a `file://` install — see below.
 
 To use the sidebar locally as well, point OpenCode at a `file://` copy of the
 package that lives **outside any `node_modules`** (see

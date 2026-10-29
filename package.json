@@ -87,7 +87,7 @@
     "test:e2e": "node test/e2e-tui.mjs --full",
     "test:e2e:quick": "node test/e2e-tui.mjs --quick",
     "test:drift": "node test/drift-watch.mjs",
-    "test:drift:strict": "node test/drift-watch.mjs --strict"
-  },
-  "prepublishOnly": "npm run build:gui && node test/prepublish.mjs && node test/e2e-tui.mjs --full"
+    "test:drift:strict": "node test/drift-watch.mjs --strict",
+    "prepublishOnly": "npm run build:gui && node test/prepublish.mjs && node test/e2e-tui.mjs --full"
+  }
 }
