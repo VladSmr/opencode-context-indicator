@@ -1,6 +1,6 @@
 {
   "name": "opencode-context-indicator",
-  "version": "1.7.0",
+  "version": "1.7.1",
   "description": "Real-time context-window usage for OpenCode: per-category token breakdown, /context-diff, a zero-LLM /cx panel with per-session cost and a searchable family-session picker, a TUI sidebar, and an experimental Desktop panel. Dual V1 + V2 plugin entry.",
   "type": "module",
   "license": "MIT",

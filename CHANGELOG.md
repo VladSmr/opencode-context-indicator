@@ -4,6 +4,40 @@ Notable user-facing changes per release. Dates are commit days (UTC).
 The package also ships a dual V1/V2 plugin — see the README for the surface
 matrix; everything below concerns the V2 path unless stated otherwise.
 
+## 1.7.1 — 2026-10-29
+
+- **Fixed: the live log no longer prints `ctx=0` above real categories.** A hook
+  breakdown whose instance has no request counters (a mirror that only saw the
+  compaction, so `input`/`ctx` are still 0) used to be printed as-is: the header
+  contradicted the category lines below it. Such an entry now takes the same
+  path as a missing/fallback one and borrows the hook-measured `state.json`
+  snapshot whole (categories, counters, residual and a `snapshot=` stamp; a
+  snapshot without a timestamp is still marked `snapshot=unknown`). A counter is
+  knowledge only when it is positive: a borrowed entry whose own counters are 0,
+  or a ctx-only snapshot with no input, prints the unknown counter as `?`, and
+  the residual as `n/a (input unknown on this instance)` instead of a fabricated
+  `0` (`other = input - sum` needs an input). The same rule now applies to a
+  local hook entry that knows `ctx` but not `input`. T36 covers all four cases:
+  whole-entry borrow, no snapshot, zero-counter snapshot, ctx-only snapshot
+  (86 checks).
+- **Fixed: the compaction reserve is 15 % again (1.7.0 regression).** 1.7.0
+  switched the denominator to a 10 % share on the strength of an unreleased
+  branch head. Every RELEASED host from 2.1.4 through 2.2.2 (2.1.4, 2.2.0,
+  2.2.1, 2.2.2) still has `RESERVE_SHARE = 0.15` in
+  `packages/core/src/session/compaction.ts` (verified tag by tag), so on those
+  hosts 1.7.0 overstated the ceiling and the `compact at` line by ~5 % of the
+  window (~26 k tokens at 512 k) and therefore under-reported every `%`. The
+  plugin now mirrors `max(floor(window * 0.15), window >= 32_000 ? 16_000 : 0)`
+  again; the formula, the 16 k floor and the `2 * RESERVE_MIN` gate are
+  unchanged. Docs, the T16/T26 tables and the seed expectations are back on the
+  15 % numbers.
+- Dev: the isolated e2e (plugin load + state write) was re-run against the
+  **2.2.2** Desktop CLI (`opencode v2.2.2`); the Desktop 2.2.2 `app.asar` still
+  carries the `@opencode/plugin/gui` / `@opencode/plugin/rpc` bridge and the
+  `ComposerPill` / `Rpc.define` / `session.panel` symbols the experimental panel
+  uses, and `opencode-cli.exe` still exposes `opentui:runtime-module:` plus the
+  `node_modules` exclusion filter.
+
 ## 1.7.0 — 2026-10-29
 
 Desktop GUI release (experimental): the plugin now has a surface in the
@@ -60,14 +94,14 @@ OpenCode Desktop app, not just in the terminal.
   its `ctx`/`input` counters, tagged `snapshot=<updatedAt>` — instead of this
   instance's fallback-shaped view. Repeated compactions of one session are also
   no longer collapsed into a single note when the host omits the event id.
-- **Reserve share corrected for opencode 2.2.x.** `calculateCeiling()` keeps the
-  same shape but the reserve share dropped from 15 % to 10 % in 2.2.0 (the
-  "fit output limits to the context window" change, PR #51271), so the plugin
-  now mirrors `max(floor(window * 0.10), window >= 32_000 ? 16_000 : 0)`. Every
-  `%` and the `compact at` line are now computed against the host's actual
-  trigger; on a large window the old formula understated the ceiling by ~5 % of
-  the window (~26 k tokens at 512 k). The 1.6.0 note that the ceiling was
-  unchanged in 2.2.0 was wrong — the `2 * RESERVE_MIN` gate did stay.
+- **Reserve share (claim in 1.7.0 was wrong; corrected in 1.7.1).** This
+  release switched the denominator to a 10 % share; no host in the verified
+  range 2.1.4 through 2.2.2 used it. `calculateCeiling()` in those tags keeps
+  `RESERVE_SHARE = 0.15`, so 1.7.0 overstated the ceiling (and the `compact at`
+  line) by ~5 % of the window (~26 k tokens at 512 k) on them and therefore
+  under-reported every `%`. The 1.6.0 note that the ceiling was unchanged in
+  2.2.0 was right (the formula and the `2 * RESERVE_MIN` gate did stay); the
+  share line here was the wrong part.
 - Dev: `lib/format.js` (pure `fmt`/`num`) extracted so the GUI bundle has no
   `node:*` import; gate (a) now expands `dist/`, gate (e)/(f) scan `gui/` and the
   GUI build config, new gate (g) validates the built CJS bundle (app-provided
@@ -100,11 +134,13 @@ Host alignment release: opencode 2.2.0 moved TUI plugins to OpenTUI 0.7.
   opencode 2.0.16+. The TUI module now ships compiled against OpenTUI 0.7, so
   the sidebar and the `/cx` panel require **opencode ≥ 2.2.0** and cannot load on
   an older host. Older-host installation was not re-verified for this release.
-- **Compaction ceiling unchanged (superseded — see 1.7.0).**
+- **Compaction ceiling unchanged (this note was right; 1.7.0 briefly wrong).**
   `calculateCeiling()` in 2.2.0 is identical
   to 2.1.x, so the `0.15 / 16k / 32k` reserve formula and every `%` denominator
   are unaffected. (2.2.0 changed how a *compaction request* is sized - measured
-  prompt instead of characters - not the trigger.)
+  prompt instead of characters - not the trigger. 1.7.0 later claimed the share
+  had dropped to 10 %; see 1.7.1 - no host in the verified range
+  2.1.4-2.2.2 uses it.)
 - Dev: `drift-watch` is green again (host 2.2.0, OpenTUI 0.7.0); `tsc`,
   `prepublish` and the isolated e2e pass against the 2.2.0 CLI.
 
@@ -150,8 +186,9 @@ Fix-and-hygiene release after a full-project review. No new commands.
 
 - **Compaction ceiling aligned with opencode 2.1.4.** `lib/limits.js`
   now mirrors `calculateCeiling()` exactly: the reserve is
-  `max(floor(window * 0.15), window >= 2 * 16_000 ? 16_000 : 0)` (was 10%;
-  the share moved again in 2.2.0 — see 1.7.0),
+  `max(floor(window * 0.15), window >= 2 * 16_000 ? 16_000 : 0)` (the plugin's
+  older builds used 10 %; no host in the verified range uses it - the share
+  stayed 0.15 there),
   and an override buffer is honored **only while it is smaller than the
   window** — a buffer configured for a larger model is ignored instead of
   leaving zero room. The `compact at` line and the `%` denominator now match the

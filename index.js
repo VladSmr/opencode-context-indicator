@@ -127,10 +127,9 @@
  *
  *   - Metric: the native opencode overflow count — tokens.total when present,
  *     else input + output + cache.read + cache.write — compared against the
- *     model's compaction ceiling (opencode calculateCeiling, core 2.2.x):
- *     window = limit.input || limit.context, reserve = max(10% of window, 16k
- *     when window >= 32k), usable = window - reserve (the share was 15% up to
- *     2.1.x). Percentages are NOT
+ *     model's compaction ceiling (opencode calculateCeiling, released 2.x):
+ *     window = limit.input || limit.context, reserve = max(15% of window, 16k
+ *     when window >= 32k), usable = window - reserve. Percentages are NOT
   *     clamped at 100% - exceeding the ceiling must stay visible.
  *   - Category estimates use a unicode-aware heuristic (see estimateTokens):
  *     Cyrillic ~2.5 chars/token, CJK ~1.5, latin/ASCII ~4. These are ESTIMATES,

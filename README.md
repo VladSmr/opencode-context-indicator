@@ -16,7 +16,7 @@ sidebar** and a **zero-LLM `/cx` breakdown panel** with measured contributors
 and a redacted export, and an **experimental Desktop GUI part**
 (`./gui-experimental`: a side-panel tab and a composer pill). The V2 path is
 **tested against opencode 2.2.0** (the isolated load + state-write e2e was also
-re-run against the 2.2.1 Desktop CLI); the V1 path against 1.18.29+.
+re-run against the 2.2.1 and 2.2.2 Desktop CLI); the V1 path against 1.18.29+.
 
 > **V1 is feature-frozen.** It is kept working for compatibility (bug fixes
 > only); all new features land in the V2 path.
@@ -72,11 +72,13 @@ For every served request the plugin estimates how the context window is split:
   duplicate group), reported honestly as *"N redundant tool outputs ≈ X tokens"*
   — never as "the model wasted effort". Findings are per-session and **path-free
   in the persisted/exported form**.
-* The denominator is the **opencode 2.2.x compaction ceiling**: `window =
-  limit.input || limit.context`; `reserve = max(floor(window * 0.10), window >=
+* The denominator is the **opencode 2.x compaction ceiling**: `window =
+  limit.input || limit.context`; `reserve = max(floor(window * 0.15), window >=
   2 * 16_000 ? 16_000 : 0)`; the ceiling is `window - reserve`. This mirrors
-  `calculateCeiling()` in `packages/core/src/session/compaction.ts` (the reserve
-  share is 10% since 2.2.0 / PR #51271; it was 15% up to 2.1.x). When opencode
+  `calculateCeiling()` in `packages/core/src/session/compaction.ts`, whose
+  `RESERVE_SHARE` is 0.15 in every released host from 2.1.4 through 2.2.2 (the
+  unreleased `v2` branch has a different share; the plugin follows the release,
+  not the branch). When opencode
   carries a `compaction.buffer` configured in its own settings, the plugin
   cannot read that value (it is not exposed to plugins), so the default
   reserve formula is used — set `OPENCODE_CONTEXT_INDICATOR_COMPACT_BUFFER`
@@ -635,7 +637,8 @@ the sidebar instead.
   and toasts keep working).
 * **OpenCode ≥ 2.2.0** for the V2 path with the TUI surfaces (built and verified
   against **2.2.0**; the isolated load + state-write e2e also passes on the
-  **2.2.1** Desktop CLI). The server-only V2 path keeps working on
+  **2.2.2** Desktop CLI, the latest at the time of writing). The server-only V2
+  path keeps working on
   2.0.16+; the TUI module pins the OpenTUI generation it was compiled against,
   so a host on OpenTUI 0.6 (opencode ≤ 2.1.4) will not load the TUI surfaces -
   neither the sidebar nor the `/cx` panel - from a 1.6.x install.
@@ -724,7 +727,7 @@ caller.
 
 ```bash
 npm run build:gui             # build dist/gui-experimental.cjs (required by the gate)
-npm run test:prepublish       # fast gate: tarball + tui.tsx + resolve + T1-T35 unit checks + GUI bundle
+npm run test:prepublish       # fast gate: tarball + tui.tsx + resolve + T1-T36 unit checks + GUI bundle
 npm run test:types            # tsc for the TUI entry AND the Desktop GUI part
 npm run test:e2e              # full E2E: isolated plugin load + one "Say OK" round-trip
 npm run test:e2e:quick        # E2E load-only, no LLM call
@@ -747,7 +750,7 @@ STEP 80 s, ~3 min total.
 | (a) tarball composition | `package.json` `files[]` expands to the base files plus every `lib/*` module (count asserted dynamically); `docs/` may contain images only; `dist/` may contain only the built GUI bundle | no test/node_modules/tsconfig in the tarball, and no published export pointing at nothing |
 | (b) pragma regression | esbuild `--jsx=automatic` → `@opentui/solid/jsx-runtime` present, `react/jsx-runtime` absent | a removed/broken pragma kills the sidebar on npm install |
 | (c) resolve chain | replica install: host-bridged + peer packages resolve; local tui.tsx relative imports resolve via node from the entry (resolve-bridge.cjs) | broken peer/optional dep or a bad local import silently breaks the sidebar |
-| (d) unit harness T1-T35 | limit/agent/state fix assertions plus measureContributors, redacted-export, shared category-helper, sanitizer/unicode, prompt-cache, waste-detector, compaction-reserve, top-consumer, diff, subagent-rollup and Desktop-RPC checks (85 total; T30 schema-vs-builder drift, T31 registration + handler, T32-T35 fallback-vs-hook category priority across the report, the shared state file and the live log, T25c/T25d compaction-hook arming, T34 cross-instance summary merge) | regressions in modelLimits, writeStateFile, hydrate, contributors, export, subagent lifetime, and a GUI/server wire mismatch |
+| (d) unit harness T1-T36 | limit/agent/state fix assertions plus measureContributors, redacted-export, shared category-helper, sanitizer/unicode, prompt-cache, waste-detector, compaction-reserve, top-consumer, diff, subagent-rollup and Desktop-RPC checks (86 total; T30 schema-vs-builder drift, T31 registration + handler, T32-T36 fallback-vs-hook category priority across the report, the shared state file and the live log (T36: a counter-less hook entry borrows the snapshot or prints `?`), T25c/T25d compaction-hook arming, T34 cross-instance summary merge) | regressions in modelLimits, writeStateFile, hydrate, contributors, export, subagent lifetime, and a GUI/server wire mismatch |
 | (e) corporate-identifier scan | no forbidden identifiers in the published surface (`index.js`, `tui.tsx`, `lib/*`, `gui/*`, `README.md`, `CHANGELOG.md`, `package.json`, the GUI build config) or the test tree | compliance |
 | (f) non-English scan | no non-ASCII letters (`\p{L}` above U+007F) in the same published surface and test tree (`docs/` is image-only and is not text-scanned) | English-only source rule |
 | (g) Desktop GUI bundle | `dist/gui-experimental.cjs` exists and is a non-trivial single-file CJS bundle: no ESM `import`, no dynamic `import()`, no Node built-in, and every app-provided module (`solid-js`, `solid-js/web`, `@opencode/plugin/gui`, `@opencode/plugin/rpc`) still a `require()` - no bundled second copy, no React/OpenTUI/bare-`opencode` import | a stale or hand-edited bundle, or a build that inlines the app instance, breaks the Desktop panel at load time |

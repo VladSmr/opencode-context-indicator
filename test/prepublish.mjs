@@ -5,7 +5,7 @@
  *   (a) tarball composition (base files + lib/ + docs/ + dist/, no dev artifacts)
  *   (b) tui.tsx transpiles with the Solid pragma intact
  *   (c) resolve chain - @opentui/solid + solid-js resolvable from tui.tsx context
- *   (d) unit-harness T1-T35 for the limit/agent/state/command/Desktop-RPC fixes
+ *   (d) unit-harness T1-T36 for the limit/agent/state/command/Desktop-RPC fixes
  *   (e) corporate-identifier scan (lib/, gui/, test/ and the published surface)
  *   (f) non-English scan - no non-ASCII letters (any language other than
  *       English) anywhere in the published surface or the test tree
@@ -243,19 +243,19 @@ console.log("\n(d) Unit harness T1–T12 + T13+...");
 const HARNESS_STATE = join(tmpdir(), "oci-prepublish-state.json");
 
 // Seed data — must yield >= 4 valid model-limit entries for T1.
-// NOTE: seed usable/limit are OLD persisted values (some written when core used
-// a 15% reserve). hydrateModelLimitsFromState() only reads `limit` and re-derives
-// the ceiling with the CURRENT formula, so a seed is accepted when its
-// `usable <= limit` (otherwise the entry is dropped, see ses_T11); the derived
-// usable is then window - reserve with reserve = max(10% of window, 16k when
-// window >= 32k).
+// NOTE: seed usable/limit may be OLD persisted values (some written with a
+// different reserve share). hydrateModelLimitsFromState() only reads `limit` and
+// re-derives the ceiling with the CURRENT formula, so a seed is accepted when
+// its `usable <= limit` (otherwise the entry is dropped, see ses_T11); the
+// derived usable is then window - reserve with reserve = max(15% of window, 16k
+// when window >= 32k).
 const seedState = {
   ses_MAIN: {
     sessionID:"ses_MAIN",parentID:null,role:"main",agent:"orchestrator",
     model:"model-alpha",providerID:"test-provider",ctx:279312,input:279000,
     usable:445645,limit:524288,reasoning:0,
     // persisted value only: a cold write inherits it; a live lookup re-derives
-    // window=524288, reserve=max(52428,16000)=52428, usable=471860
+    // window=524288, reserve=max(78643,16000)=78643, usable=445645
     categories:{user:1000,assistant:1000,reasoning:0,toolArgs:0,system:1000,toolSchemas:1000,other:1000},
     updatedAt:"2026-09-29T18:51:54.013Z",
   },
@@ -263,7 +263,7 @@ const seedState = {
     sessionID:"ses_OLDAGENT",parentID:"ses_MAIN",role:"sub",agent:"code_critic",
     model:"model-beta",providerID:"test-provider",ctx:60950,input:60000,
     usable:891290,limit:1048576,reasoning:0,
-    // derived ceiling: window=1048576, reserve=104857, usable=943719
+    // derived ceiling: window=1048576, reserve=157286, usable=891290
     categories:{user:100,assistant:100,reasoning:0,toolArgs:0,system:null,toolSchemas:null,other:100},
     updatedAt:"2026-09-29T17:25:10.535Z",
   },
@@ -271,7 +271,7 @@ const seedState = {
     sessionID:"ses_T7",parentID:null,role:"main",agent:null,
     model:"model-gamma",providerID:"test-provider",ctx:50000,input:50000,
     usable:170000,limit:200000,reasoning:0,
-    // derived ceiling: window=200000, reserve=max(20000,16000)=20000, usable=180000
+    // derived ceiling: window=200000, reserve=max(30000,16000)=30000, usable=170000
     categories:{user:100,assistant:100,reasoning:0,toolArgs:0,system:100,toolSchemas:100,other:100},
     updatedAt:"2026-09-29T18:00:00.000Z",
   },
@@ -279,7 +279,7 @@ const seedState = {
     sessionID:"ses_T8",parentID:null,role:"main",agent:null,
     model:"model-theta",providerID:"provA",ctx:10,input:10,
     usable:189,limit:222,reasoning:0,
-    // derived ceiling: window=222, reserve=max(22,0)=22, usable=200
+    // derived ceiling: window=222, reserve=floor(222*0.15)=33, usable=189
     categories:{user:1,assistant:1,reasoning:0,toolArgs:0,system:1,toolSchemas:1,other:1},
     updatedAt:"2026-09-29T18:00:00.000Z",
   },
@@ -287,7 +287,7 @@ const seedState = {
     sessionID:"ses_T9_OLD",parentID:null,role:"main",agent:null,
     model:"model-delta",providerID:"test-provider",ctx:1,input:1,
     usable:170000,limit:200000,reasoning:0,
-    // derived ceiling: window=200000, reserve=20000, usable=180000 (seed stays)
+    // derived ceiling: window=200000, reserve=30000, usable=170000 (seed stays)
     categories:{user:1,assistant:1,reasoning:0,toolArgs:0,system:1,toolSchemas:1,other:1},
     updatedAt:"2026-09-29T10:00:00.000Z",
   },
@@ -295,7 +295,7 @@ const seedState = {
     sessionID:"ses_T9_NEW",parentID:null,role:"main",agent:null,
     model:"model-delta",providerID:"test-provider",ctx:1,input:1,
     usable:891290,limit:1048576,reasoning:0,
-    // derived ceiling: window=1048576, reserve=104857, usable=943719 (freshest wins)
+    // derived ceiling: window=1048576, reserve=157286, usable=891290 (freshest wins)
     categories:{user:1,assistant:1,reasoning:0,toolArgs:0,system:1,toolSchemas:1,other:1},
     updatedAt:"2026-09-29T18:00:00.000Z",
   },
@@ -303,7 +303,7 @@ const seedState = {
     sessionID:"ses_T10_A",parentID:null,role:"main",agent:null,
     model:"model-epsilon",providerID:"test-provider",ctx:1,input:1,
     usable:170000,limit:200000,reasoning:0,
-    // derived ceiling: window=200000, reserve=20000, usable=180000 (seed stays)
+    // derived ceiling: window=200000, reserve=30000, usable=170000 (seed stays)
     categories:{user:1,assistant:1,reasoning:0,toolArgs:0,system:1,toolSchemas:1,other:1},
     updatedAt:"2026-09-29T10:00:00.000Z",
   },
@@ -311,7 +311,7 @@ const seedState = {
     sessionID:"ses_T10_B",parentID:null,role:"main",agent:null,
     model:"model-epsilon",providerID:"test-provider",ctx:1,input:1,
     usable:170000,limit:200000,reasoning:0,
-    // derived ceiling: window=200000, reserve=20000, usable=180000 (freshest)
+    // derived ceiling: window=200000, reserve=30000, usable=170000 (freshest)
     categories:{user:1,assistant:1,reasoning:0,toolArgs:0,system:1,toolSchemas:1,other:1},
     updatedAt:"2026-09-29T18:00:00.000Z",
   },
@@ -319,7 +319,7 @@ const seedState = {
     sessionID:"ses_T11",parentID:null,role:"main",agent:null,
     model:"model-zeta",providerID:"test-provider",ctx:1,input:1,
     usable:300000,limit:200000,reasoning:0,
-    // derived ceiling: window=200000, usable=180000; seed 300000 > limit -> filtered
+    // derived ceiling: window=200000, usable=170000; seed 300000 > limit -> filtered
     categories:{user:1,assistant:1,reasoning:0,toolArgs:0,system:1,toolSchemas:1,other:1},
     updatedAt:"2026-09-29T18:00:00.000Z",
   },
@@ -327,7 +327,7 @@ const seedState = {
     sessionID:"ses_T12",parentID:null,role:"main",agent:null,
     model:"model-eta",providerID:"test-provider",ctx:1,input:1,
     usable:425000,limit:500000,reasoning:0,
-    // derived ceiling: window=500000, reserve=50000, usable=450000 (seed <= limit)
+    // derived ceiling: window=500000, reserve=75000, usable=425000 (seed <= limit)
     categories:{user:1,assistant:1,reasoning:0,toolArgs:0,system:1,toolSchemas:1,other:1},
     updatedAt:"2026-09-29T18:00:00.000Z",
   },
@@ -336,7 +336,7 @@ const seedState = {
     sessionID:"ses_EXT_A",parentID:null,role:"main",agent:"code_critic",
     model:"Claude-3.5-Sonnet",providerID:"anthropic",ctx:200000,input:199000,
     usable:170000,limit:200000,reasoning:0,
-    // derived ceiling: window=200000, reserve=20000, usable=180000
+    // derived ceiling: window=200000, reserve=30000, usable=170000
     categories:{user:1,assistant:1,reasoning:0,toolArgs:0,system:1,toolSchemas:1,other:1},
     updatedAt:"2026-09-29T12:00:00.000Z",
   },
@@ -344,7 +344,7 @@ const seedState = {
     sessionID:"ses_EXT_B",parentID:null,role:"main",agent:null,
     model:"gemini-2.5-Pro",providerID:"google",ctx:1048576,input:1048000,
     usable:891290,limit:1048576,reasoning:0,
-    // derived ceiling: window=1048576, reserve=104857, usable=943719
+    // derived ceiling: window=1048576, reserve=157286, usable=891290
     categories:{user:1,assistant:1,reasoning:0,toolArgs:0,system:1,toolSchemas:1,other:1},
     updatedAt:"2026-09-29T15:30:00.000Z",
   },
@@ -455,22 +455,22 @@ const state1 = read();
 const repMain = await mod.collectSessionReport(mockCtx,"ses_MAIN",state1,Date.now()+2000);
 const rowMain = mod.renderSessionRow(repMain, true);
 check("T4 main row keeps the % (denominator from state)", () => {
-  // Derived: usable=471860; ctx=279312; pct=279312/471860=59%
-  assert(repMain.usable === 471860);
+  // Derived: usable=445645; ctx=279312; pct=279312/445645=63%
+  assert(repMain.usable === 445645);
   assert(rowMain.startsWith("| main |"));
-  assert(rowMain.includes("(59%)"), rowMain);
+  assert(rowMain.includes("(63%)"), rowMain);
 });
 
 // T4b
 const sumText = mod.shortSummaryText(repMain);
 const sumDesc = mod.shortSummaryDescription(repMain);
 check("T4b /context summary shows denominator + % + compact-at", () => {
-  // ctx=279312, usable=471860, pct=59%, reserve=max(52428,16000)=52428
-  assert(sumText.includes("/ 471.9k (59%)"), sumText.split("\n")[0]);
-  assert(sumText.includes("compact at 471.9k"), sumText);
-  // fmt(52428) = "52.4k"
-  assert(sumText.includes("(52.4k reserve)"), sumText);
-  assert(sumDesc.includes("(59%)"), sumDesc);
+  // ctx=279312, usable=445645, pct=63%, reserve=max(78643,16000)=78643
+  assert(sumText.includes("/ 445.6k (63%)"), sumText.split("\n")[0]);
+  assert(sumText.includes("compact at 445.6k"), sumText);
+  // fmt(78643) = "78.6k"
+  assert(sumText.includes("(78.6k reserve)"), sumText);
+  assert(sumDesc.includes("(63%)"), sumDesc);
 });
 
 // T5
@@ -500,12 +500,12 @@ capture(() => mod.hydrateModelLimitsFromState());
 const state2 = read();
 const repT7 = await mod.collectSessionReport(mockCtx,"ses_T7",state2,Date.now()+2000);
 check("T7 denominator == entry.limit window (new formula, not old usable-as-window)", () => {
-  // Seed: limit=200000, usable=170000. Derived: window=200000, reserve=max(20000,16000)=20000, usable=180000
+  // Seed: limit=200000, usable=170000. Derived: window=200000, reserve=max(30000,16000)=30000, usable=170000
   // (The old formula would have double-reserved; the derived ceiling ignores the seed usable)
-  assert(mod.getUsableContext("test-provider","model-gamma")?.usable === 180000);
-  assert(repT7.usable === 180000, `got ${repT7.usable}`);
-  // reserve should be 20000 (10% of 200000, which exceeds 16000)
-  assert(mod.getUsableContext("test-provider","model-gamma")?.reserved === 20000);
+  assert(mod.getUsableContext("test-provider","model-gamma")?.usable === 170000);
+  assert(repT7.usable === 170000, `got ${repT7.usable}`);
+  // reserve should be 30000 (15% of 200000, which exceeds 16000)
+  assert(mod.getUsableContext("test-provider","model-gamma")?.reserved === 30000);
 });
 
 // T8
@@ -521,8 +521,8 @@ check("T8 provider change does not inherit usable/limit", () => {
 mod.modelLimits.clear();
 const cap9 = capture(() => mod.hydrateModelLimitsFromState());
 check("T9 stale 170k vs fresh 891290 -> freshest wins", () => {
-  // derived: window=1048576, reserve=max(104857,16000)=104857, usable=943719
-  assert(mod.getUsableContext("test-provider","model-delta")?.usable === 943719);
+  // derived: window=1048576, reserve=max(157286,16000)=157286, usable=891290
+  assert(mod.getUsableContext("test-provider","model-delta")?.usable === 891290);
   assert(cap9.logs.some((l)=>l.includes("model-delta")&&l.includes("891290")));
   assert(cap9.errs.some((l)=>l.includes("spread")&&l.includes("model-delta")));
 });
@@ -530,9 +530,9 @@ check("T9 stale 170k vs fresh 891290 -> freshest wins", () => {
 // T10
 mod.modelLimits.clear();
 const cap10 = capture(() => mod.hydrateModelLimitsFromState());
-check("T10 uniform candidates -> 180k, no spread warning", () => {
-  // derived: window=200000, reserve=20000, usable=180000
-  assert(mod.getUsableContext("test-provider","model-epsilon")?.usable === 180000);
+check("T10 uniform candidates -> 170k, no spread warning", () => {
+  // derived: window=200000, reserve=30000, usable=170000
+  assert(mod.getUsableContext("test-provider","model-epsilon")?.usable === 170000);
   assert(!cap10.errs.some((l)=>l.includes("model-epsilon")));
 });
 
@@ -544,12 +544,12 @@ check("T11 usable > limit is dropped", () => {
   assert(!mod.modelLimits.has("test-provider:model-zeta"));
 });
 
-// T12: usable < limit (450k/500k) — LEGITIMATE, seeded.
+// T12: usable < limit (425k/500k) - LEGITIMATE, seeded.
 mod.modelLimits.clear();
 const cap12 = capture(() => mod.hydrateModelLimitsFromState());
 check("T12 usable < limit is LEGITIMATE, seeded", () => {
-  // derived: window=500000, reserve=50000, usable=450000 (seed usable <= limit)
-  assert(mod.getUsableContext("test-provider","model-eta")?.usable === 450000);
+  // derived: window=500000, reserve=75000, usable=425000 (seed usable <= limit)
+  assert(mod.getUsableContext("test-provider","model-eta")?.usable === 425000);
   assert(cap12.logs.some((l)=>l.includes("model-eta")&&l.includes("425000")));
 });
 
@@ -680,7 +680,7 @@ check("T13h measureContributors: robustness against junk entries", () => {
 check("T14 buildRedactedPayload: no preview text, no full session id, no tool output content", () => {
   const now = new Date("2026-10-08T14:25:30.123Z");
   const sessionID = "ses_testABCDEF";
-  const root = { model: "your-model", providerID: "your-provider", ctx: 100000, usable: 180000, limit: 200000, updatedAt: "2026-10-08T14:25:00.000Z" };
+  const root = { model: "your-model", providerID: "your-provider", ctx: 100000, usable: 170000, limit: 200000, updatedAt: "2026-10-08T14:25:00.000Z" };
   const rows = [root, { model: "sub-model", ctx: 50000, usable: 90000, limit: 100000, updatedAt: "2026-10-08T14:20:00.000Z" }];
   const contributors = [
     { kind: "asst.text", ref: "14:25", chars: 200, tokensEstimate: 50, tool: "", preview: "SENSITIVE DATA" },
@@ -710,8 +710,8 @@ check("T14a buildRedactedPayload: pct rounding", () => {
 check("T14b buildRedactedPayload: family role mapping (positional main)", () => {
   const now = new Date();
   const rows = [
-    { model: "main-model", ctx: 100, usable: 180000, limit: 200000, updatedAt: "2026-10-08T00:00:00.000Z" },
-    { model: "sub-model", ctx: 50, usable: 180000, limit: 200000, updatedAt: "2026-10-08T00:01:00.000Z" },
+    { model: "main-model", ctx: 100, usable: 170000, limit: 200000, updatedAt: "2026-10-08T00:00:00.000Z" },
+    { model: "sub-model", ctx: 50, usable: 170000, limit: 200000, updatedAt: "2026-10-08T00:01:00.000Z" },
   ];
   const payload = contrib.buildRedactedPayload({ sessionID: "s", root: rows[0], rows, contributors: [], now, panelDenom: contrib.panelDenom, panelRole: contrib.panelRole, num: (v) => v || 0 });
   assert(payload.family[0].role === "main", `root should be main, got ${payload.family[0].role}`);
@@ -744,55 +744,55 @@ check("T15a exportFileName: id8 truncation", () => {
   assert(!name.includes("averylongsessionidstringhere"), "full session id leaked");
 });
 
-check("T16 reserve: window 200000 -> usable 180000 reserve 20000", () => {
-  // 200000 >= 32000, so reserve = max(20000, 16000) = 20000 (core 2.2.x: 10%)
-  assert(mod.getUsableContext("test-provider","model-gamma")?.usable === 180000, "window=200000: usable should be 180000");
-  assert(mod.getUsableContext("test-provider","model-gamma")?.reserved === 20000, "reserve should be 20000");
+check("T16 new formula: window 200000 -> usable 170000 reserve 30000", () => {
+  // 200000 >= 32000, so reserve = max(30000, 16000) = 30000 (core: 15%)
+  assert(mod.getUsableContext("test-provider","model-gamma")?.usable === 170000, "window=200000: usable should be 170000");
+  assert(mod.getUsableContext("test-provider","model-gamma")?.reserved === 30000, "reserve should be 30000");
 });
 
-check("T16a reserve: window 100000 -> reserve 16000 (min beats 10%)", () => {
-  // floor(100000 * 0.10) = 10000 < 16000 -> RESERVE_MIN wins
+check("T16a new formula: window 100000 -> reserve 16000 (min beats 15%)", () => {
+  // floor(100000 * 0.15) = 15000 < 16000 -> RESERVE_MIN wins
   const r = mod.reserveFor(100000, undefined);
   assert(r === 16000, `window=100000: reserve should be 16000, got ${r}`);
 });
 
-check("T16b reserve: window 24000 -> reserve 2400", () => {
-  // 24000 < 2 * RESERVE_MIN, so no floor: floor(24000 * 0.10) = 2400
+check("T16b new formula: window 24000 -> reserve 3600", () => {
+  // 24000 < 2 * RESERVE_MIN, so no floor: floor(24000 * 0.15) = 3600
   const r = mod.reserveFor(24000, undefined);
-  assert(r === 2400, `window=24000: reserve should be 2400, got ${r}`);
+  assert(r === 3600, `window=24000: reserve should be 3600, got ${r}`);
 });
 
-check("T16c reserve: window 30000 -> reserve 3000", () => {
-  // 30000 < 32000, so no floor: floor(30000 * 0.10) = 3000
+check("T16c new formula: window 30000 -> reserve 4500", () => {
+  // 30000 < 32000, so no floor: floor(30000 * 0.15) = 4500
   const r = mod.reserveFor(30000, undefined);
-  assert(r === 3000, `window=30000: reserve should be 3000, got ${r}`);
+  assert(r === 4500, `window=30000: reserve should be 4500, got ${r}`);
 });
 
-check("T16c2 reserve: window 32000 -> reserve 16000 (threshold)", () => {
+check("T16c2 new formula: window 32000 -> reserve 16000 (threshold)", () => {
   // 32000 === 2 * RESERVE_MIN -> floor = RESERVE_MIN
   assert(mod.reserveFor(32000, undefined) === 16000);
-  assert(mod.reserveFor(31999, undefined) === 3199);
+  assert(mod.reserveFor(31999, undefined) === 4799);
 });
 
-check("T16d reserve: 10% share never exceeds the floor on a big window", () => {
-  // reserveFor(120000) = max(12000, 16000) = 16000
+check("T16d reserve: window 120000 -> 18000 (share beats floor)", () => {
+  // reserveFor(120000) = max(18000, 16000) = 18000
   const r = mod.reserveFor(120000, undefined);
-  assert(r === 16000, `window=120000: reserve should be 16000, got ${r}`);
+  assert(r === 18000, `window=120000: reserve should be 18000, got ${r}`);
   assert(mod.getUsableContext("test-provider","model-gamma")?.limit === 200000, "window is the seeded context");
 });
 
-check("T16e reserve: unknown limits -> null", () => {
+check("T16e new formula: unknown limits -> null", () => {
   assert(mod.getUsableContext("nonexistent-provider","nonexistent-model") == null);
 });
 
-check("T16f reserve: hydrated seed no double-reserve", () => {
+check("T16f new formula: hydrated seed no double-reserve", () => {
   // Seed ses_T7: usable=170000, limit=200000.
-  // The seed is re-derived from the raw window: 200000 - 20000 = 180000.
+  // The seed is re-derived from the raw window: 200000 - 30000 = 170000.
   mod.modelLimits.clear();
   capture(() => mod.hydrateModelLimitsFromState());
   const info = mod.getUsableContext("test-provider","model-gamma");
-  assert(info?.usable === 180000, `hydrated usable should be 180000, got ${info?.usable}`);
-  assert(info?.reserved === 20000, `hydrated reserve should be 20000, got ${info?.reserved}`);
+  assert(info?.usable === 170000, `hydrated usable should be 170000, got ${info?.usable}`);
+  assert(info?.reserved === 30000, `hydrated reserve should be 30000, got ${info?.reserved}`);
 });
 
 check("T16g reserveFor: bufferOverride takes precedence", () => {
@@ -802,13 +802,13 @@ check("T16g reserveFor: bufferOverride takes precedence", () => {
 
 check("T16h reserveFor: invalid bufferOverride falls through to formula", () => {
   const r1 = mod.reserveFor(200000, -1);
-  assert(r1 === 20000, `negative bufferOverride should be ignored, got ${r1}`);
+  assert(r1 === 30000, `negative bufferOverride should be ignored, got ${r1}`);
   const r2 = mod.reserveFor(200000, 1e10);
-  assert(r2 === 20000, `>1e9 bufferOverride should be ignored, got ${r2}`);
+  assert(r2 === 30000, `>1e9 bufferOverride should be ignored, got ${r2}`);
   const r3 = mod.reserveFor(200000, NaN);
-  assert(r3 === 20000, `NaN bufferOverride should be ignored, got ${r3}`);
+  assert(r3 === 30000, `NaN bufferOverride should be ignored, got ${r3}`);
   const r4 = mod.reserveFor(200000, "not a number");
-  assert(r4 === 20000, `string bufferOverride should be ignored, got ${r4}`);
+  assert(r4 === 30000, `string bufferOverride should be ignored, got ${r4}`);
   // Valid: 0 is accepted (zero reserve), and any value < window is honored.
   assert(mod.reserveFor(200000, 0) === 0);
   assert(mod.reserveFor(200000, 199999) === 199999);
@@ -816,15 +816,15 @@ check("T16h reserveFor: invalid bufferOverride falls through to formula", () => 
 
 check("T16h2 reserveFor: buffer >= window is ignored (core semantics)", () => {
   // A buffer configured for a larger model must not leave zero room.
-  assert(mod.reserveFor(200000, 200000) === 20000);
-  assert(mod.reserveFor(200000, 250000) === 20000);
+  assert(mod.reserveFor(200000, 200000) === 30000);
+  assert(mod.reserveFor(200000, 250000) === 30000);
   assert(mod.reserveFor(50000, 50000) === 16000);
   // getUsableContext must apply the same guard to the env override.
   const prev = process.env.OPENCODE_CONTEXT_INDICATOR_COMPACT_BUFFER;
   process.env.OPENCODE_CONTEXT_INDICATOR_COMPACT_BUFFER = "250000";
   try {
     const info = mod.getUsableContext("test-provider", "model-gamma");
-    assert(info?.usable === 180000, `ignored oversized env buffer, got ${info?.usable}`);
+    assert(info?.usable === 170000, `ignored oversized env buffer, got ${info?.usable}`);
   } finally {
     if (prev === undefined) delete process.env.OPENCODE_CONTEXT_INDICATOR_COMPACT_BUFFER;
     else process.env.OPENCODE_CONTEXT_INDICATOR_COMPACT_BUFFER = prev;
@@ -963,7 +963,7 @@ check("T18c toolOut: legacy entry without the field normalises to 0", () => {
   cur.ses_T18C = {
     sessionID: "ses_T18C", parentID: null, role: "main", agent: null,
     model: "model-alpha", providerID: "test-provider", ctx: 100, input: 100,
-    usable: 180000, limit: 200000, reasoning: 0,
+    usable: 170000, limit: 200000, reasoning: 0,
     categories: { user: 1, assistant: 1, reasoning: 0, toolArgs: 1, system: null, toolSchemas: null, other: 97 },
     updatedAt: new Date().toISOString(),
   };
@@ -1024,7 +1024,7 @@ check("T19b compacted mark: stale even without a live breakdown (cross-instance)
 check("T19a stale surface: summary + table row show the marker", () => {
   const report = {
     sessionID: "ses_T19", modelID: "model-alpha", providerID: "test-provider",
-    ctxTokens: 480, usable: 180000, reserve: 18000,
+    ctxTokens: 480, usable: 170000, reserve: 18000,
     categories: { user: 1, assistant: 1, reasoning: 0, toolArgs: 0, toolOut: 0, system: 1, toolSchemas: 1, other: 0 },
     toolOutByTool: null, compactStale: true, source: "snapshot",
     updatedAt: new Date().toISOString(),
@@ -1090,7 +1090,7 @@ check("T20c toolOutByTool: persisted end-to-end and rendered in the breakdown", 
   const e = read().ses_T20C;
   assert(e.toolOutByTool && e.toolOutByTool.webfetch === 100, `webfetch 100 persisted, got ${e.toolOutByTool?.webfetch}`);
   assert(e.toolOutByTool.read === 10, "read 10 persisted");
-  const row = mod.renderSessionRow({ sessionID: "ses_T20C", modelID: "model-alpha", ctxTokens: 1000, usable: 180000, categories: e.categories, toolOutByTool: e.toolOutByTool, source: "snapshot", updatedAt: e.updatedAt }, true);
+  const row = mod.renderSessionRow({ sessionID: "ses_T20C", modelID: "model-alpha", ctxTokens: 1000, usable: 170000, categories: e.categories, toolOutByTool: e.toolOutByTool, source: "snapshot", updatedAt: e.updatedAt }, true);
   const table = mod.renderBreakdownTable([row], 0, { toolOutByTool: e.toolOutByTool });
   assert(table.includes("Tool results by tool (main)"), "by-tool section present");
   assert(table.includes("webfetch 100"), `by-tool line lists webfetch 100: ${table.split("\n").slice(-1)[0]}`);
@@ -1264,7 +1264,7 @@ check("T24c waste persisted path-free + rendered", () => {
   }
   const rep = {
     sessionID: "ses_T24C", modelID: "model-alpha", providerID: "test-provider",
-    ctxTokens: 1000, inputTokens: 1000, usable: 180000, reserve: 18000,
+    ctxTokens: 1000, inputTokens: 1000, usable: 170000, reserve: 18000,
     categories: e.categories, toolOutByTool: e.toolOutByTool, reclaim: e.reclaim,
     cacheRead: null, cacheWrite: null, compactStale: false, source: "snapshot",
     updatedAt: e.updatedAt,
@@ -1444,16 +1444,16 @@ check("T25d compaction hook that could not persist does not arm the guard", () =
 
 const cacheMod = await import(pathToFileURL(join(repoRoot, "lib", "cache.js")).href);
 
-check("T26 reserve mirrors core 2.2.x calculateCeiling (10% share, 16k floor, 32k gate)", () => {
+check("T26 reserve mirrors core v2 calculateCeiling (15% share, 16k floor, 32k gate)", () => {
   const cases = [
-    [200000, 20000], // 10% share wins; the pre-2.2 15% share would give 30000
-    [524288, 52428],
-    [1048576, 104857],
-    [100000, 16000], // 10% = 10000 < floor
+    [200000, 30000], // 15% share wins
+    [524288, 78643],
+    [1048576, 157286],
+    [100000, 16000], // 15% = 15000 < floor
     [32000, 16000], // 2 * RESERVE_MIN gate: floor applies exactly here
-    [160000, 16000], // tie: 10% share == the 16k floor
-    [31999, 3199], // one below the gate: share only, no floor
-    [1000, 100], // tiny window: share only
+    [160000, 24000], // above the gate: 15% share beats the floor
+    [31999, 4799], // one below the gate: share only, no floor
+    [1000, 150], // tiny window: share only
     [1, 0],
   ];
   for (const [win, want] of cases) {
@@ -2356,10 +2356,240 @@ check("T32 client-context fallback never shadows hook-measured categories", () =
       "the merged record must be hook-measured (a later fallback cannot overwrite it)",
     );
   });
+
+  // (6) A hook cache entry whose instance has NO request counters. The categories
+  // are real, but `input`/`ctx` are 0 because this instance never completed a
+  // step (a mirror that only saw the compaction). Printing `ctx=0` above real
+  // categories is worse than useless: the state.json measurement is borrowed
+  // whole, and when there is none the header says "?" instead of a fake 0.
+  const t36NoState = "ses_T36b_nostate";
+  mod.modelLimits.clear();
+  capture(() => mod.hydrateModelLimitsFromState());
+  mod.breakdownCache.delete(t35Id);
+  mod.breakdownCache.set(t35Id, {
+    userChars: 120,
+    assistantChars: 80,
+    reasoningChars: 0,
+    toolArgsChars: 0,
+    toolOutChars: 0,
+    toolOutByTool: {},
+    systemChars: 300,
+    toolSchemasChars: 100,
+    reclaim: null,
+    top: [],
+    capturedAt: Date.now(),
+    source: "context-hook",
+  });
+  const t36Borrowed = v2Mod
+    .buildLiveLinesV2(t35Id, "model-alpha", "test-provider", 0, 0, 0)
+    .join("\n");
+  mod.breakdownCache.delete(t35Id);
+
+  mod.breakdownCache.set(t36NoState, {
+    userChars: 60,
+    assistantChars: 40,
+    reasoningChars: 0,
+    toolArgsChars: 0,
+    toolOutChars: 0,
+    toolOutByTool: {},
+    systemChars: null,
+    toolSchemasChars: null,
+    reclaim: null,
+    top: [],
+    capturedAt: Date.now(),
+    source: "compaction-hook",
+  });
+  const t36Unknown = v2Mod
+    .buildLiveLinesV2(t36NoState, "model-alpha", "test-provider", 0, 0, 0)
+    .join("\n");
+  mod.breakdownCache.delete(t36NoState);
+
+  // A state entry CAN exist while its counters are 0 (the trailing-event
+  // fallback of a mirror writes one without a positive ctx gate). A zero is
+  // "unknown", not knowledge: the header must still say "?", and the residual
+  // must not be pulled from `other: 0` computed against input 0.
+  const t36ZeroSnap = "ses_T36d_zerosnap";
+  const t36ZeroState = read();
+  t36ZeroState[t36ZeroSnap] = {
+    sessionID: t36ZeroSnap,
+    parentID: null,
+    role: "main",
+    agent: null,
+    model: "model-alpha",
+    providerID: "test-provider",
+    ctx: 0,
+    input: 0,
+    usable: null,
+    limit: null,
+    reasoning: 0,
+    categories: {
+      user: 61,
+      assistant: 41,
+      reasoning: 0,
+      toolArgs: 0,
+      system: null,
+      toolSchemas: null,
+      other: 0,
+    },
+    source: "compaction-hook",
+    updatedAt: "2026-10-29T17:00:00.000Z",
+  };
+  writeFileSync(HARNESS_STATE, JSON.stringify(t36ZeroState), "utf8");
+  mod.breakdownCache.set(t36ZeroSnap, {
+    userChars: 62,
+    assistantChars: 42,
+    reasoningChars: 0,
+    toolArgsChars: 0,
+    toolOutChars: 0,
+    toolOutByTool: {},
+    systemChars: null,
+    toolSchemasChars: null,
+    reclaim: null,
+    top: [],
+    capturedAt: Date.now(),
+    source: "compaction-hook",
+  });
+  const t36Zero = v2Mod
+    .buildLiveLinesV2(t36ZeroSnap, "model-alpha", "test-provider", 0, 0, 0)
+    .join("\n");
+  mod.breakdownCache.delete(t36ZeroSnap);
+  delete t36ZeroState[t36ZeroSnap];
+  writeFileSync(HARNESS_STATE, JSON.stringify(t36ZeroState), "utf8");
+
+  // A ctx-only snapshot: the compaction hook knows the context size but a
+  // mirror instance never saw the request, so `input` is genuinely unknown and
+  // the residual (`other = input - sum`) must not be printed from a 0 input.
+  const t36CtxOnly = "ses_T36e_ctxonly";
+  const t36CtxState = read();
+  t36CtxState[t36CtxOnly] = {
+    sessionID: t36CtxOnly,
+    parentID: null,
+    role: "main",
+    agent: null,
+    model: "model-alpha",
+    providerID: "test-provider",
+    ctx: 500,
+    input: 0,
+    usable: null,
+    limit: null,
+    reasoning: 0,
+    categories: {
+      user: 80,
+      assistant: 20,
+      reasoning: 0,
+      toolArgs: 0,
+      system: null,
+      toolSchemas: null,
+      other: 0,
+    },
+    source: "compaction-hook",
+    updatedAt: "2026-10-29T17:05:00.000Z",
+  };
+  writeFileSync(HARNESS_STATE, JSON.stringify(t36CtxState), "utf8");
+  mod.breakdownCache.set(t36CtxOnly, {
+    userChars: 81,
+    assistantChars: 21,
+    reasoningChars: 0,
+    toolArgsChars: 0,
+    toolOutChars: 0,
+    toolOutByTool: {},
+    systemChars: null,
+    toolSchemasChars: null,
+    reclaim: null,
+    top: [],
+    capturedAt: Date.now(),
+    source: "compaction-hook",
+  });
+  const t36Ctx = v2Mod
+    .buildLiveLinesV2(t36CtxOnly, "model-alpha", "test-provider", 0, 0, 0)
+    .join("\n");
+  mod.breakdownCache.delete(t36CtxOnly);
+  delete t36CtxState[t36CtxOnly];
+  writeFileSync(HARNESS_STATE, JSON.stringify(t36CtxState), "utf8");
+
+  // Regression guard: with counters present nothing is borrowed (and the
+  // residual is recomputed against the local input, no snapshot tag).
+  const t36LocalId = "ses_T36c_local";
+  mod.breakdownCache.set(t36LocalId, {
+    userChars: 100,
+    assistantChars: 60,
+    reasoningChars: 0,
+    toolArgsChars: 0,
+    toolOutChars: 0,
+    toolOutByTool: {},
+    systemChars: 250,
+    toolSchemasChars: null,
+    reclaim: null,
+    top: [],
+    capturedAt: Date.now(),
+    source: "transform",
+  });
+  const t36Local = v2Mod
+    .buildLiveLinesV2(t36LocalId, "model-alpha", "test-provider", 800, 800, 0)
+    .join("\n");
+  mod.breakdownCache.delete(t36LocalId);
+
+  check("T36 live log: a hook entry without counters borrows the snapshot or says unknown", () => {
+    assert(
+      t36Borrowed.includes("input=900 snapshot=") &&
+        t36Borrowed.includes("other       250"),
+      `a counter-less hook cache must borrow the whole snapshot, got:\n${t36Borrowed}`,
+    );
+    // The cache says assistant 80, the snapshot 60: only a whole-entry borrow
+    // prints 60. Asserting just the counters would also pass a header-only fix.
+    assert(
+      t36Borrowed.includes("assistant   60 (est tokens)") &&
+        !t36Borrowed.includes("assistant   80"),
+      `the categories must come from the snapshot too, got:\n${t36Borrowed}`,
+    );
+    assert(
+      !/\bctx=0\b/.test(t36Borrowed) && !/\bcount=0\b/.test(t36Borrowed),
+      `the header must not print 0 next to real categories, got:\n${t36Borrowed}`,
+    );
+    assert(
+      t36Unknown.includes("ctx=?/") && t36Unknown.includes("input=?"),
+      `without a snapshot the counters must be unknown, got:\n${t36Unknown}`,
+    );
+    assert(
+      t36Unknown.includes("other       n/a (input unknown on this instance)"),
+      `the residual must not be fabricated, got:\n${t36Unknown}`,
+    );
+    assert(
+      t36Unknown.includes("user        60 (est tokens)") &&
+        t36Unknown.includes("source      compaction-hook"),
+      `the local (measured) categories must still be printed, got:\n${t36Unknown}`,
+    );
+    assert(
+      t36Zero.includes("ctx=?/") &&
+        t36Zero.includes("input=?") &&
+        t36Zero.includes("other       n/a (input unknown on this instance)") &&
+        !/\bctx=0\b/.test(t36Zero) &&
+        !/\bcount=0\b/.test(t36Zero) &&
+        !t36Zero.includes("other       0"),
+      `a zero-counter snapshot is still unknown, got:\n${t36Zero}`,
+    );
+    assert(
+      t36Zero.includes("snapshot=2026-10-29T17:00:00.000Z"),
+      `a borrowed zero-counter entry must still be stamped, got:\n${t36Zero}`,
+    );
+    assert(
+      t36Ctx.includes("count=500") &&
+        t36Ctx.includes("input=?") &&
+        t36Ctx.includes("other       n/a (input unknown on this instance)") &&
+        !t36Ctx.includes("other       0"),
+      `a ctx-only snapshot keeps the window but not a fake input/residual, got:\n${t36Ctx}`,
+    );
+    assert(
+      t36Local.includes("input=800") &&
+        !t36Local.includes("snapshot=") &&
+        t36Local.includes("other       390"),
+      `a local measurement with counters must stay local, got:\n${t36Local}`,
+    );
+  });
 }
 
 if (failed) fatal(`${failed} unit test(s) failed`);
-pass(`all ${ranChecks} unit checks passed (T1-T12 + T13-T35)`);
+pass(`all ${ranChecks} unit checks passed (T1-T12 + T13-T36)`);
 
 // ---------------------------------------------------------------------------
 // (e) corporate-identifier scan — no employer/vendor-specific names may appear
