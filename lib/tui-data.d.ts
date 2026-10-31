@@ -54,7 +54,6 @@ export interface StateEntry {
 
 export declare const STATE_FILE: string
 export declare const POLL_MS: number
-export declare function isNodeModulesInstall(): boolean
 export declare function readSnapshot(): Record<string, StateEntry>
 export declare function collectFamily(
   snapshot: Record<string, StateEntry>,

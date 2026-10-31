@@ -8,7 +8,7 @@
 // does not provide (another copy of Effect or Solid, any other @opencode/*
 // entry), which is exactly the invariant we want to keep.
 //
-// Not used by the TUI part: tui.tsx is compiled by the host loader.
+// Not used by the TUI part: tui.ts is compiled by the host loader.
 
 import { defineConfig } from "vite"
 import { gui } from "@opencode/plugin/gui/vite"

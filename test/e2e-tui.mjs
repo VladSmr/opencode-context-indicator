@@ -7,6 +7,7 @@
  *   node test/e2e-tui.mjs            # full: plugin load + one "Say OK" round-trip
  *   node test/e2e-tui.mjs --full     # same as default
  *   node test/e2e-tui.mjs --quick    # load only (no LLM call)
+ *   node test/e2e-tui.mjs --check-c  # npm-layout liveness only (no LLM call)
  *
  * ISOLATION — your running OpenCode Desktop is NOT touched:
  *   • --standalone          the test spins its OWN private server instead of the
@@ -26,6 +27,9 @@
  *         real config (which is never read or modified).
  *       Check B — the owner's real global config (read-only): the round-trip
  *         needs the configured provider/model, which may be defined there.
+ *       Check C — `npm pack` of this checkout extracted into a throwaway
+ *         node_modules/opencode-context-indicator, loaded from there: the exact
+ *         path shape of an npm install (see #33884).
  *
  * Environment overrides:
  *   OPENCODE_CLI        path to opencode-cli.exe (default: Programs\@opencode-aidesktop)
@@ -33,13 +37,14 @@
  *                       mode; use your own `provider/model` id, e.g. `prov/model`)
  *                       — not needed for --quick.
  *
- * Timings: INIT 45 s, STEP 80 s, total budget ~180 s.  On timeout the PTY
+ * Timings: INIT 45 s, STEP 80 s, PROBE 45 s, total budget ~260 s.  On timeout the PTY
  * process tree is killed and an ANSI-stripped diagnostic tail is printed.
  */
 
 import pty from "node-pty";
 import {
   readFileSync,
+  readdirSync,
   statSync,
   unlinkSync,
   accessSync,
@@ -63,9 +68,13 @@ const repoRoot  = join(__dirname, "..");
 // mode / timings
 // ---------------------------------------------------------------------------
 const quickMode = process.argv.includes("--quick");
+// Debug shortcut for the #33884 workaround: runs ONLY the packed-install
+// liveness probe, so a maintainer can iterate on the TUI tree without spending
+// an LLM round-trip. The full gate (npm publish) always runs A + B + C.
+const onlyCheckC = process.argv.includes("--check-c");
 const INIT_TIMEOUT_MS = 45_000;
 const STEP_TIMEOUT_MS = 80_000;
-const TOTAL_BUDGET_MS = 180_000;
+const TOTAL_BUDGET_MS = 260_000;
 const runStartedAt = Date.now();
 
 // ---------------------------------------------------------------------------
@@ -230,7 +239,7 @@ function shQuoteArg(arg) {
   return `'${s.replace(/'/g, "'\\''")}'`;
 }
 
-function runPty(extraArgs, timeoutMs, isDone, graceMs = 0, configDir) {
+function runPty(extraArgs, timeoutMs, isDone, graceMs = 0, configDir, extraEnv) {
   return new Promise((resolve) => {
     let buf = "";
     let done = false;
@@ -245,12 +254,16 @@ function runPty(extraArgs, timeoutMs, isDone, graceMs = 0, configDir) {
       ? ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", cliCmd]
       : ["-c", cliCmd];
 
+    // extraEnv is applied LAST: a check can override the shared isolation roots
+    // with its own private ones (Check C) without duplicating childEnv().
+    const env = { ...childEnv(configDir), ...(extraEnv || {}) };
+
     const p = pty.spawn(shell, shellArgs, {
       name: "xterm-256color",
       cols: 200,
       rows: 50,
       cwd: tmpdir(),
-      env: childEnv(configDir),
+      env,
     });
 
     const finish = (exitCode, timedOut) => {
@@ -482,6 +495,181 @@ async function checkB() {
 }
 
 // ---------------------------------------------------------------------------
+// Check C: npm-layout install — the packaged plugin must stay LIVE
+//
+// OpenCode installs npm plugins into a `node_modules` tree and, for such paths,
+// skips its Solid/Babel JSX transform (upstream anomalyco/opencode#33884): a
+// JSX-built slot mounts once and freezes. This package therefore ships no JSX at
+// all (lib/tui-h.ts) — and this check is the only place that proves it, because
+// Check A loads the checkout from OUTSIDE node_modules.
+//
+// The tarball is produced by `npm pack` (the real published file set), extracted
+// into a throwaway node_modules/opencode-context-indicator, and loaded as a
+// file:// plugin from there. Liveness is sampled by the env-gated probe the
+// ./tui entry mounts next to the sidebar (OPENCODE_CONTEXT_INDICATOR_TUI_LIVENESS):
+// a `ref` on a getter-driven text node, sampled every 250 ms. A frozen tree
+// writes the same rendered text forever.
+// ---------------------------------------------------------------------------
+const CHECK_C_ROOT    = join(tmpdir(), "oci-check-c");
+const CHECK_C_PKG_DIR = join(CHECK_C_ROOT, "node_modules", "opencode-context-indicator");
+const CHECK_C_CONFIG  = join(CHECK_C_ROOT, "config");
+const CHECK_C_LIVE    = join(CHECK_C_ROOT, "liveness.log");
+
+function preparePackedInstall() {
+  rmSync(CHECK_C_ROOT, { recursive: true, force: true });
+  const packOut = join(CHECK_C_ROOT, "pack");
+  mkdirSync(packOut, { recursive: true });
+
+  // `npm` is a .cmd shim on Windows, which spawnSync can only run through the
+  // shell. Every path handed to it lives under %TEMP% and contains no spaces or
+  // shell metacharacters; assert that instead of guessing at quoting.
+  if (/[\s"'&|<>^%]/.test(packOut) || /[\s"'&|<>^%]/.test(repoRoot)) {
+    return { ok: false, reason: "workspace path contains a space or shell metacharacter" };
+  }
+  const pack = spawnSync("npm", ["pack", "--pack-destination", packOut, "--json"], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    timeout: 120_000,
+    shell: process.platform === "win32",
+  });
+  if (pack.status !== 0) {
+    return { ok: false, reason: `npm pack failed (${pack.status}): ${(pack.stderr || "").slice(0, 300)}` };
+  }
+  const tgz = readdirSync(packOut).find((f) => f.endsWith(".tgz"));
+  if (!tgz) return { ok: false, reason: "npm pack produced no tarball" };
+
+  mkdirSync(CHECK_C_PKG_DIR, { recursive: true });
+  const untar = spawnSync(
+    "tar",
+    ["-xzf", join(packOut, tgz), "-C", CHECK_C_PKG_DIR, "--strip-components=1"],
+    { encoding: "utf8", timeout: 120_000 },
+  );
+  if (untar.status !== 0) {
+    return { ok: false, reason: `tar failed (${untar.status}): ${(untar.stderr || "").slice(0, 300)}` };
+  }
+  if (!existsSync(join(CHECK_C_PKG_DIR, "tui.ts"))) {
+    return { ok: false, reason: "extracted package has no tui.ts" };
+  }
+  if (!existsSync(join(CHECK_C_PKG_DIR, "lib", "tui-h.ts"))) {
+    return { ok: false, reason: "extracted package has no lib/tui-h.ts" };
+  }
+  // The whole point of the JSX-free rewrite: the shipped package must need no
+  // local node_modules (no @opentui/solid, no duplicate Solid/OpenTUI).
+  if (existsSync(join(CHECK_C_PKG_DIR, "node_modules"))) {
+    return { ok: false, reason: "packed package contains its own node_modules" };
+  }
+
+  mkdirSync(CHECK_C_CONFIG, { recursive: true });
+  writeFileSync(
+    join(CHECK_C_CONFIG, "opencode.json"),
+    JSON.stringify({ plugins: [pathToFileURL(CHECK_C_PKG_DIR).href], update: "disable" }, null, 2),
+    "utf8",
+  );
+  return { ok: true };
+}
+
+async function checkC() {
+  console.log("\n=== Check C: npm-layout install stays live (#33884) ===");
+
+  const prep = preparePackedInstall();
+  if (!prep.ok) {
+    console.error(`\n[FAIL] Check C: ${prep.reason}`);
+    return false;
+  }
+  console.log(`  packed install:  \u2713  ${CHECK_C_PKG_DIR}`);
+
+  try { unlinkSync(CHECK_C_LIVE); } catch { /* ok */ }
+
+  const livenessLines = () => {
+    try {
+      return readFileSync(CHECK_C_LIVE, "utf8").split("\n").filter(Boolean);
+    } catch {
+      return [];
+    }
+  };
+  const renderedTexts = () =>
+    new Set(
+      livenessLines()
+        .map((l) => (l.match(/ text=(.*)$/) || [])[1] || "")
+        .filter((t) => t && t !== "?"),
+    );
+
+  // Early-stop once the probe has produced three DIFFERENT rendered texts: that
+  // cannot happen without the host re-running the reactive getters.
+  const r = await runPty(
+    ["--standalone", "--print-logs"],
+    45_000,
+    () => renderedTexts().size >= 3,
+    2000,
+    CHECK_C_CONFIG,
+    {
+      // Private log/state roots: never share the owner's, never share Check A's.
+      XDG_DATA_HOME: join(CHECK_C_ROOT, "xdg-data"),
+      XDG_CACHE_HOME: join(CHECK_C_ROOT, "xdg-cache"),
+      XDG_STATE_HOME: join(CHECK_C_ROOT, "xdg-state"),
+      OPENCODE_DB: join(CHECK_C_ROOT, "check-c.db"),
+      OPENCODE_CONTEXT_INDICATOR_STATE_FILE: join(CHECK_C_ROOT, "state.json"),
+      OPENCODE_CONTEXT_INDICATOR_TUI_LIVENESS: CHECK_C_LIVE,
+      OPENCODE_CONTEXT_INDICATOR_TUI_MARKER: "1",
+    },
+  );
+
+  // Give a late flush a moment on a cold machine (same reasoning as Check A).
+  if (r.timedOut) await new Promise((resolve) => setTimeout(resolve, 2000));
+
+  const lines = livenessLines();
+  const texts = [...renderedTexts()];
+  const ticks = new Set(
+    lines.map((l) => (l.match(/tick=(\d+)/) || [])[1]).filter(Boolean),
+  );
+  const live = texts.length >= 3;
+  // Which slot actually mounted: a standalone instance with no session does not
+  // necessarily mount `sidebar.content`, so the probe also lives in the `app`
+  // slot. Either marker proves setup() ran and a contribution was rendered.
+  const mountedSlots = lines.filter((l) => l.startsWith("slot-render "));
+  // The exact failure the JSX-free rewrite prevents: a file that did not get the
+  // host's runtime-specifier rewrite keeps a literal import and dies here.
+  const runtimeFailure = /Cannot find package '@opentui\/solid'|Cannot find module/.test(
+    stripAnsi(r.buf || ""),
+  );
+
+  console.log(`  probe samples:   ${lines.length}`);
+  console.log(`  distinct ticks:  ${ticks.size}${ticks.size > 0 ? ` (last ${[...ticks][ticks.size - 1]})` : ""}`);
+  console.log(`  rendered texts:  ${live ? "\u2713" : "\u2717"}  ${texts.slice(0, 5).join(" | ")}`);
+  console.log(`  slots mounted:   ${mountedSlots.length ? mountedSlots.join(", ") : "\u2717 none"}`);
+  console.log(`  process:         exit=${r.exitCode}${r.timedOut ? " (TIMED OUT)" : ""}`);
+
+  if (runtimeFailure) {
+    console.error("\n[FAIL] Check C: the packed install could not resolve @opentui/solid");
+    console.error("       A TUI file kept a literal `@opentui/solid/jsx-runtime` import —");
+    console.error("       most likely an extensionless relative import that the host's");
+    console.error("       import.meta.resolve walk did not follow (gate (b) enforces this).");
+    diag(r);
+    return false;
+  }
+
+  if (mountedSlots.length === 0) {
+    console.error("\n[FAIL] Check C: no TUI slot was mounted in the packed install");
+    console.error("       The probe file exists but no slot render ran, so setup() or");
+    console.error("       context.ui.slot() failed. See the diagnostic tail below.");
+    diag(r);
+    return false;
+  }
+
+  if (!live) {
+    console.error("\n[FAIL] Check C: the npm-layout install did NOT stay live");
+    console.error("       The probe never produced three different rendered texts. If the sidebar");
+    console.error("       tree is JSX-built it mounts once and freezes here (#33884); a missing");
+    console.error("       probe means setup() did not run at all.");
+    diag(r);
+    return false;
+  }
+
+  console.log("\n[PASS] Check C: packed install under node_modules renders reactively");
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // Exit helper
 // ---------------------------------------------------------------------------
 // Do NOT call process.exit() here. On Windows the node-pty/conpty teardown can
@@ -520,6 +708,12 @@ async function main() {
     finish(0); return; // not a failure - CI may not have OpenCode
   }
 
+  if (onlyCheckC) {
+    const c = await checkC();
+    finish(c ? 0 : 1);
+    return;
+  }
+
   if (!quickMode && !process.env.OPENCODE_E2E_MODEL) {
     console.error("[FAIL] OPENCODE_E2E_MODEL is not set.");
     console.error("       The full E2E makes one round-trip, so it needs a model id.");
@@ -543,6 +737,9 @@ async function main() {
     const b = await checkB();
     if (!b) { console.error("\n[e2e FAILED] Check B"); finish(1); return; }
 
+    const c = await checkC();
+    if (!c) { console.error("\n[e2e FAILED] Check C"); finish(1); return; }
+
     const desktopAfter = desktopSnapshot();
     if (desktopBefore && desktopAfter) {
       const unchanged = desktopBefore === desktopAfter;
@@ -555,7 +752,12 @@ async function main() {
   const elapsed = ((Date.now() - runStartedAt) / 1000).toFixed(1);
   const budget  = (TOTAL_BUDGET_MS / 1000).toFixed(0);
   console.log("\n" + "=".repeat(70));
-  console.log(`ALL CHECKS PASSED  (${elapsed}s / ${budget}s budget)`);
+  console.log(`ALL CHECKS PASSED  (${elapsed}s, soft budget ${budget}s)`);
+  if (Date.now() - runStartedAt > TOTAL_BUDGET_MS) {
+    // The budget is a signal, not a gate: each check has its own hard timeout,
+    // so overrunning it means the machine is slow, not that a check hung.
+    console.log(`[warn] over the soft budget by ${(elapsed - budget).toFixed(1)}s — check machine load`);
+  }
   console.log("=".repeat(70));
   finish(0);
 }

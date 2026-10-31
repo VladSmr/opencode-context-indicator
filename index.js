@@ -117,7 +117,7 @@
  *     %TEMP%\opencode-context-indicator-state.json   (os.tmpdir())
  *   — a machine-readable { sessionID: { model, providerID, ctx, usable,
  *     reserve, limit, categories{...}, updatedAt } } snapshot consumed by the
- *   optional TUI sidebar in ./tui.tsx (package entry "./tui"). Written atomically
+ *   optional TUI sidebar in ./tui.ts (package entry "./tui"). Written atomically
  *   (temp + rename), keyed by session, bounded to MAX_TRACKED_SESSIONS, and
  *   strictly additive: any failure is swallowed and never affects the log.
  *
@@ -128,9 +128,10 @@
  *   - Metric: the native opencode overflow count — tokens.total when present,
  *     else input + output + cache.read + cache.write — compared against the
  *     model's compaction ceiling (opencode calculateCeiling, released 2.x):
- *     window = limit.input || limit.context, reserve = max(15% of window, 16k
- *     when window >= 32k), usable = window - reserve. Percentages are NOT
-  *     clamped at 100% - exceeding the ceiling must stay visible.
+ *     window = min(input, context) when both are known, else input || context;
+ *     reserve = max(15% of window, 16k when window >= 32k);
+ *     usable = window - reserve. Percentages are NOT
+ *     clamped at 100% - exceeding the ceiling must stay visible.
  *   - Category estimates use a unicode-aware heuristic (see estimateTokens):
  *     Cyrillic ~2.5 chars/token, CJK ~1.5, latin/ASCII ~4. These are ESTIMATES,
  *     not a tokenizer; "other" is the residual input − sum of estimates.

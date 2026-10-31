@@ -1,11 +1,11 @@
 /**
  * drift-watch.mjs — OpenTUI pin / host-type alignment check (CI + manual).
  *
- * The plugin pins @opentui/solid to the EXACT version of the OpenTUI stack the
- * host OpenCode ships: the host does not bridge @opentui/solid, so a version
- * skew between our compiled JSX runtime and the host renderer is a live-panel
- * risk. The @opencode/plugin devDependency feeds tsc for the TUI entry, so it
- * must track the released host too.
+ * The plugin pins @opentui/solid (a DEV dependency: types only — the host
+ * provides the runtime instance) to the EXACT version of the OpenTUI stack the
+ * host OpenCode ships, so our type surface matches the renderer an npm install
+ * talks to. The @opencode/plugin devDependency feeds tsc for the TUI entry, so
+ * it must track the released host too.
  *
  * Source of truth for "what the host ships": the latest RELEASED opencode.
  *   1. npm registry: @opencode/cli latest version (no GitHub API, no auth,
@@ -43,7 +43,7 @@ const strict =
   process.argv.includes("--strict") || /^(1|true)$/i.test(process.env.DRIFT_STRICT || "");
 
 const ours = {
-  solid: pkg.dependencies?.["@opentui/solid"],
+  solid: pkg.devDependencies?.["@opentui/solid"],
   core: pkg.devDependencies?.["@opentui/core"],
   hostPlugin: pkg.devDependencies?.["@opencode/plugin"],
 };
@@ -214,7 +214,7 @@ async function run() {
   };
 
   check(
-    'dependencies["@opentui/solid"]',
+    'devDependencies["@opentui/solid"]',
     ours.solid,
     host.solid,
     { zeroMinorIsBreaking: true },
@@ -253,7 +253,7 @@ async function run() {
       1,
       `[drift-watch FAIL] ${reason}\n${report}\n` +
         "  Align this repo with the host before the next release, then update\n" +
-        "  the README/tui.tsx header mentions and re-run the gates.",
+        "  the README/tui.ts header mentions and re-run the gates.",
     );
   }
 

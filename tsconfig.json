@@ -4,13 +4,12 @@
     "lib": ["ES2022"],
     "module": "ESNext",
     "moduleResolution": "bundler",
-    "jsx": "react-jsx",
-    "jsxImportSource": "@opentui/solid",
+    "allowImportingTsExtensions": true,
     "strict": true,
     "noEmit": true,
     "skipLibCheck": true,
     "allowJs": true,
     "types": ["node"]
   },
-  "include": ["tui.tsx", "lib/**/*.tsx"]
+  "include": ["tui.ts", "lib/**/*.ts"]
 }

@@ -4,6 +4,63 @@ Notable user-facing changes per release. Dates are commit days (UTC).
 The package also ships a dual V1/V2 plugin — see the README for the surface
 matrix; everything below concerns the V2 path unless stated otherwise.
 
+## 1.8.0 — 2026-10-31
+
+- **The TUI sidebar and the `/cx` panel are live for npm installs too**
+  (workaround for upstream anomalyco/opencode#33884). OpenCode skips its
+  Solid/Babel JSX transform for any file inside a `node_modules` directory, so a
+  JSX-built slot mounted from an npm install rendered once and then froze on
+  "no data yet"; 1.7.x avoided that by disabling the surfaces entirely. The TUI
+  tree is now built with `jsx()` plus getter props (`lib/tui-h.ts`), which needs
+  no transform at all: the host rewrites the literal
+  `@opentui/solid/jsx-runtime` import to its own in-process module, so the
+  surfaces stay reactive from any install path. The npm-path auto-disable and its
+  console hint are gone; `file://` installs behave exactly as before.
+  - Relative imports of `.ts` files now carry the extension (`./lib/tui-h.ts`):
+    the host decides which files get the runtime rewrite by walking the import
+    graph with `import.meta.resolve`, which never probes extensions. An
+    extensionless import silently kept the literal `@opentui/solid` specifier
+    and failed with `Cannot find package '@opentui/solid'` - gate (b) now
+    rejects it.
+- **No runtime dependencies at all.** `@opentui/solid` moved from
+  `dependencies` to `devDependencies` (types + local typecheck only, still
+  pinned to an exact version). A fresh install drops from ~28 MB / ~800 files to
+  a 147 KB tarball (27 files, ~419 KB unpacked), and the duplicate
+  `@opentui/core`
+  / Babel toolchain
+  (`@babel/core`, `babel-plugin-module-resolver`, `babel-preset-solid`, `s-js`,
+  `entities`) no longer lands in the opencode cache next to the host's own copy.
+- **Baseline: opencode 2.2.5 / OpenTUI 0.8.** Dev dependencies, the peer floor
+  and the typecheck now target `@opentui/solid` + `@opentui/core` `0.8.0` and
+  `@opencode/plugin` `2.2.5` (opencode 2.2.3 made OpenTUI 0.8 mandatory for TUI
+  plugins; 2.2.5 is the latest release at the time of writing and still ships
+  0.8.0). `jsx()`/getter semantics are unchanged in 0.8 - `spreadExpression`
+  still reads every prop inside a `createRenderEffect` - so the JSX-free tree
+  behaves exactly as before; the whole gate set (types, fast gate, Check C) was
+  re-run on a real 2.2.5 host. A host that still ships OpenTUI 0.7 (opencode
+  2.2.0-2.2.2) may not load the TUI surfaces.
+- **Denominator follows opencode 2.2.5.** The context window used for every
+  percentage is now `input && context ? min(input, context) : input || context`,
+  mirroring core's `inputWindow()` after #60660: a provider that reports an
+  input limit above the context window cannot use it in full, because the
+  context also holds the reply. Before this release an input limit above the
+  context window was used as-is, which overstated the window (and printed a
+  compact-at point the host never reaches). Covered by unit test T37. opencode
+  2.2.5 also accepts a percentage `compaction.buffer`; that setting is not
+  visible to plugins, so a percentage buffer still shows the default reserve.
+- **Gates cover the failure mode end to end.** Fast gate (b) is rewritten: the
+  TUI surface must contain no `.tsx`/`.jsx` file and no `@jsx*` pragma, every
+  TUI source must parse with esbuild `loader:"ts"` (JSX syntax fails), and
+  imports must stay inside the host-bridged allowlist. Gate (c) now walks the
+  real import graph and fails if a host-bridged module is a production
+  dependency. New e2e **Check C**: `npm pack` → extract into a throwaway
+  `node_modules/opencode-context-indicator` → isolated `--standalone` TUI →
+  assert an env-gated getter-driven probe keeps re-rendering (a frozen tree
+  writes the same value forever). `node test/e2e-tui.mjs --check-c` runs it
+  alone, without an LLM call.
+- **Docs:** the README no longer describes a `file://`-only live sidebar;
+  "Live sidebar" documents the JSX-free design and the size win.
+
 ## 1.7.1 — 2026-10-29
 
 - **Fixed: the live log no longer prints `ctx=0` above real categories.** A hook

@@ -1,86 +1,134 @@
-// resolve-bridge.cjs — CommonJS bridge for createRequire.
-// Verifies that the packages tui.tsx statically imports can be resolved.
-// @opencode/plugin/tui has a known CJS createRequire edge case with package
-// exports (it works in ESM and in the real opencode runtime); we verify it
-// via the esbuild transpilation check instead.
+// resolve-bridge.cjs — gate (c) of test/prepublish.mjs.
+//
+// Checks the import graph of the TUI surface (tui.ts + lib/*.ts) against the
+// SAME rules gate (b) uses (test/lib/import-scan.cjs):
+//
+//  1. every BARE specifier is a module opencode's TUI loader provides
+//     in-process (@opencode/plugin/tui, @opentui/solid*, solid-js, solid-js/*);
+//     anything else is unresolvable inside the host bundle;
+//  2. none of those host-bridged modules is a PRODUCTION dependency: shipping
+//     one installs a second copy next to the host's instance, and a duplicated
+//     Solid/OpenTUI desynchronises reactivity (frozen sidebar, #33884 family of
+//     bugs). They are devDependencies only (types + local typecheck/esbuild);
+//  3. every RELATIVE specifier carries a file extension (the host's rewrite walk
+//     uses import.meta.resolve, which does not probe extensions) and points at
+//     a file we actually ship.
+//
+// The scan is driven by the sources themselves: a new import added to a TUI
+// file cannot escape this gate.
+const fs = require("fs");
 const path = require("path");
 const { createRequire } = require("module");
 const { pathToFileURL } = require("url");
+const {
+  isBuiltin,
+  isRelative,
+  isHostBridged,
+  hasFileExtension,
+  importSpecifiersOf,
+  tuiSourcesOf,
+} = require("./lib/import-scan.cjs");
 
-// Use a file INSIDE the package that resolves via its own exports field.
-const pluginTUIFile = pathToFileURL(path.join(
-  __dirname, "..", "node_modules", "@opencode", "plugin", "dist", "tui", "index.js",
-)).href;
-const require2 = createRequire(pluginTUIFile);
+const repoRoot = path.join(__dirname, "..");
+const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
+const prodDeps = new Set(Object.keys(pkg.dependencies || {}));
 
-const checks = [
-  ["@opentui/solid/jsx-runtime", true],
-  ["solid-js", true],
-  // @opentui/core is an optional peer — safe to fail (sidebar unavailable, main
-  // plugin still works).  Verified via esbuild transpile, not here.
-  ["@opentui/core", true],  // optional peer — resolves with our devDeps
-];
+// Bare specifier -> owning package name ("@a/b/c" -> "@a/b", "a/b" -> "a").
+const packageNameOf = (spec) => {
+  const parts = spec.split("/");
+  return spec.startsWith("@") ? parts.slice(0, 2).join("/") : parts[0];
+};
 
-// Local relative imports from tui.tsx resolve through the ordinary node
-// mechanism (the host only bridges host modules), so verify them with a
-// require rooted AT tui.tsx — the same base directory the TUI loader uses.
-// (createRequire from @opencode/plugin/tui cannot resolve repo-relative paths,
-// which is why these need their own resolver.)
-const localChecks = [
-  ["./lib/contributors.js", true],
-  ["./lib/tui-data.js", true],
-  ["./lib/estimate.js", true],
-  ["./lib/tui-theme.js", true],
-  // Extensionless TSX imports: node's CJS resolver cannot resolve them (no
-  // .tsx extension search), but the TUI host (Bun) resolves TS/TSX extensions
-  // for relative imports — so verify the file exists next to tui.tsx instead.
-  ["./lib/tui-sidebar", true, [".tsx"]],
-  ["./lib/tui-panel", true, [".tsx"]],
-];
-const tuiRequire = createRequire(
-  pathToFileURL(path.join(__dirname, "..", "tui.tsx")).href,
-);
+const tuiSources = tuiSourcesOf(fs, path, repoRoot);
+
+// No "" candidate: an extensionless relative import is a hard failure (rule 3),
+// so only real file names may satisfy the existence check.
+const CANDIDATE_EXTENSIONS = [".ts", ".js", ".mjs", ".cjs", "/index.ts", "/index.js"];
+const resolveLocal = (spec, fromRel) => {
+  const base = path.resolve(path.dirname(path.join(repoRoot, fromRel)), spec);
+  if (fs.existsSync(base) && fs.statSync(base).isFile()) return base;
+  for (const ext of CANDIDATE_EXTENSIONS) {
+    const candidate = base + ext;
+    if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) return candidate;
+  }
+  return null;
+};
 
 let failed = 0;
-for (const [pkg, mustResolve] of checks) {
-  try {
-    const r = require2.resolve(pkg);
-    if (mustResolve) console.log("OK " + pkg + " -> " + r);
-    else console.log("UNEXPECTED_OK " + pkg + " -> " + r);
-  } catch (e) {
-    if (mustResolve) {
-      console.error("FAILED " + pkg + ": " + e.code);
-      failed++;
-    } else {
-      console.log("EXPECTED_FAIL " + pkg + ": " + e.code);
+const fail = (msg) => {
+  console.error("FAILED " + msg);
+  failed++;
+};
+
+// Dev-tree resolution is what typecheck/esbuild need; the runtime copy comes
+// from the host, so a missing devDependency is a tooling break, not a ship
+// blocker — reported but not fatal.
+const devRequire = createRequire(
+  pathToFileURL(path.join(repoRoot, "node_modules", "@opencode", "plugin", "dist", "tui", "index.js")).href,
+);
+
+let bareChecked = 0;
+let localChecked = 0;
+for (const rel of tuiSources) {
+  const source = fs.readFileSync(path.join(repoRoot, rel), "utf8");
+  for (const spec of importSpecifiersOf(source)) {
+    if (isBuiltin(spec)) continue;
+
+    if (isRelative(spec)) {
+      if (!hasFileExtension(spec)) {
+        fail(
+          `${rel}: relative import "${spec}" has no file extension — the host ` +
+            `rewrite walk does not resolve extensionless imports, so that file ` +
+            `keeps a literal jsx-runtime import and the npm install fails with ` +
+            `Cannot find package '@opentui/solid'. Write "${spec}.ts" (or .js).`,
+        );
+        continue;
+      }
+      const resolved = resolveLocal(spec, rel);
+      if (!resolved) {
+        fail(`${rel}: relative import "${spec}" does not resolve to a shipped file`);
+        continue;
+      }
+      localChecked++;
+      console.log("OK " + rel + " -> " + path.relative(repoRoot, resolved).replace(/\\/g, "/"));
+      continue;
     }
+
+    if (!isHostBridged(spec)) {
+      fail(
+        `${rel}: import "${spec}" is not bridged by the opencode TUI loader ` +
+          `(allowed: node:*, bun:*, relative, @opencode/plugin/tui, ` +
+          `@opentui/solid*, solid-js[/store])`,
+      );
+      continue;
+    }
+
+    const owner = packageNameOf(spec);
+    if (prodDeps.has(owner)) {
+      fail(
+        `${rel}: "${spec}" comes from the host, but "${owner}" is a PRODUCTION ` +
+          `dependency — a second instance breaks reactivity. Move it to devDependencies.`,
+      );
+      continue;
+    }
+
+    bareChecked++;
+    let devResolved = null;
+    try {
+      devResolved = devRequire.resolve(spec);
+    } catch {
+      /* dev-tree resolution is advisory (see note above) */
+    }
+    console.log(
+      `OK ${rel} -> ${spec} (host-bridged${devResolved ? ", dev copy present" : ""})`,
+    );
   }
 }
-const fs = require("fs");
-for (const [spec, mustResolve, extensions] of localChecks) {
-  let resolved = null;
-  try {
-    resolved = tuiRequire.resolve(spec);
-  } catch (e) {
-    // Fall through to the explicit-extension existence check below.
-  }
-  if (!resolved && Array.isArray(extensions)) {
-    for (const ext of extensions) {
-      const candidate = path.join(__dirname, "..", spec.replace(/^\.\//, "") + ext);
-      if (fs.existsSync(candidate)) {
-        resolved = candidate;
-        break;
-      }
-    }
-  }
-  if (resolved) {
-    if (mustResolve) console.log("OK " + spec + " -> " + resolved);
-    else console.log("UNEXPECTED_OK " + spec + " -> " + resolved);
-  } else if (mustResolve) {
-    console.error("FAILED " + spec + " (no resolver match, no candidate file)");
-    failed++;
-  } else {
-    console.log("EXPECTED_FAIL " + spec);
-  }
+
+if (bareChecked === 0) {
+  fail("no host-bridged import found in the TUI surface — the scan found nothing to verify");
 }
 if (failed > 0) process.exit(1);
+console.log(
+  `resolve chain OK: ${bareChecked} host-bridged import(s), ${localChecked} local import(s)`,
+);

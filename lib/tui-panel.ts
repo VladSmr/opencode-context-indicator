@@ -1,9 +1,8 @@
-/** @jsxImportSource @opentui/solid */
-// lib/tui-panel.tsx — the `session.panel` component (BreakdownPanel), moved
-// verbatim from tui.tsx when the TUI entry was split: the host's Solid
-// transform applies to EVERY plugin file outside node_modules
-// (solid-plugin.js sourceFilter in @opentui/solid), so JSX in imported files
-// is compiled the same way as in the entry.
+// lib/tui-panel.ts — the `session.panel` component (BreakdownPanel).
+//
+// No JSX and no `@jsxImportSource` pragma anywhere in this file: see the long
+// explanation at the top of lib/tui-h.ts. Every dynamic prop is a getter, which
+// is exactly what the Solid compiler would have emitted for `prop={expr}`.
 
 import { usePlugin } from "@opencode/plugin/tui"
 import { createMemo, Show } from "solid-js"
@@ -13,6 +12,7 @@ import { basename, join } from "node:path"
 import type { StateEntry } from "./tui-data.js"
 import { collectFamily, fit, fmt, num, toolOutEntries, updatedAt } from "./tui-data.js"
 import { token } from "./tui-theme.js"
+import { c as comp, h } from "./tui-h.ts"
 import {
   buildRedactedPayload,
   contributorLine,
@@ -189,7 +189,7 @@ function resolveRoot(
 // the shared 1 s tick, so both surfaces refresh on ONE poll. The family is
 // rooted at the panel session's TOPMOST ancestor, so opening the panel from a
 // subagent view shows the whole family. `cx` opens the panel (registered from
-// the "app" slot in tui.tsx; also reachable from the command palette, since
+// the "app" slot in tui.ts; also reachable from the command palette, since
 // subagent views have no prompt input).
 export function BreakdownPanel(props: {
   panel: PanelInput
@@ -638,76 +638,142 @@ export function BreakdownPanel(props: {
     return parts.join(" \u00b7 ")
   }
 
-  return (
-    <box flexDirection="column">
-      <text fg={base()}>{header()}</text>
-      <Show
-        when={data().root}
-        fallback={<text fg={muted()}>{"  no data yet"}</text>}
-      >
-        <text fg={muted()}>{columns()}</text>
-        {data().rows.map((e, i) => (
-          <text fg={muted()}>{row(e, i === 0)}</text>
-        ))}
-        <Show
-          when={
-            (data().root?.usable ?? 0) > 0
-          }
-        >
-          <text fg={muted()}>
-            {"  compact at " +
-              fmt(num(data().root?.usable)) +
-              (num(data().root?.reserve) > 0
-                ? " (" + fmt(num(data().root?.reserve)) + " reserve)"
-                : "")}
-          </text>
-        </Show>
-        <Show
-          when={
-            num(data().root?.cacheRead) > 0 ||
-            num(data().root?.cacheWrite) > 0
-          }
-        >
-          <text fg={muted()}>
-            {"  prompt cache r " +
-              fmt(num(data().root?.cacheRead)) +
-              " / w " +
-              fmt(num(data().root?.cacheWrite)) +
-              " (provider-reported)"}
-          </text>
-        </Show>
-        <Show when={num(data().root?.reclaim?.tokens) > 0}>
-          <text fg={muted()}>
-            {"  reclaim ~" +
-              fmt(num(data().root?.reclaim?.tokens)) +
-              " redundant tool output (" +
-              num(data().root?.reclaim?.count) +
-              " dup)"}
-          </text>
-        </Show>
-        <Show when={messages().available}>
-          <text fg={base()}>{"largest contributors (measured)"}</text>
-          <Show
-            when={contributors().length > 0}
-            fallback={<text fg={muted()}>{"  no messages yet"}</text>}
-          >
-            {contributors()
-              .slice(0, 5)
-              .map((c, i) => (
-                <text fg={muted()}>{contributorLine(c, i + 1)}</text>
-              ))}
-          </Show>
-          <text fg={muted()}>
-            {
-              "measured != server categories: contributors attribute outputs per tool call; the server's toolOut category only totals them"
-            }
-          </text>
-        </Show>
-        <Show when={byToolLine().length > 0}>
-          <text fg={base()}>{"tool results by tool"}</text>
-          <text fg={muted()}>{byToolLine()}</text>
-        </Show>
-      </Show>
-    </box>
-  )
+  // Muted / highlighted single-line text node. The content accessor is read
+  // inside the getter, so the node updates in place on every poll instead of
+  // being recreated (same semantics as `<text>{expr}</text>` in JSX).
+  const mutedText = (value: () => string) =>
+    h("text", {
+      get fg() {
+        return muted()
+      },
+      get children() {
+        return value()
+      },
+    })
+
+  const baseText = (value: () => string) =>
+    h("text", {
+      get fg() {
+        return base()
+      },
+      get children() {
+        return value()
+      },
+    })
+
+  const compactLine = (): string =>
+    "  compact at " +
+    fmt(num(data().root?.usable)) +
+    (num(data().root?.reserve) > 0
+      ? " (" + fmt(num(data().root?.reserve)) + " reserve)"
+      : "")
+
+  const cacheLine = (): string =>
+    "  prompt cache r " +
+    fmt(num(data().root?.cacheRead)) +
+    " / w " +
+    fmt(num(data().root?.cacheWrite)) +
+    " (provider-reported)"
+
+  const reclaimLine = (): string =>
+    "  reclaim ~" +
+    fmt(num(data().root?.reclaim?.tokens)) +
+    " redundant tool output (" +
+    num(data().root?.reclaim?.count) +
+    " dup)"
+
+  return h("box", {
+    flexDirection: "column",
+    get children() {
+      return [
+        baseText(() => header()),
+        comp(Show, {
+          get when() {
+            return data().root
+          },
+          get fallback() {
+            return mutedText(() => "  no data yet")
+          },
+          get children() {
+            return [
+              mutedText(() => columns()),
+              data()
+                .rows.map((e, i) =>
+                  mutedText(() => row(e, i === 0)),
+                ),
+              comp(Show, {
+                get when() {
+                  return (data().root?.usable ?? 0) > 0
+                },
+                get children() {
+                  return mutedText(() => compactLine())
+                },
+              }),
+              comp(Show, {
+                get when() {
+                  return (
+                    num(data().root?.cacheRead) > 0 ||
+                    num(data().root?.cacheWrite) > 0
+                  )
+                },
+                get children() {
+                  return mutedText(() => cacheLine())
+                },
+              }),
+              comp(Show, {
+                get when() {
+                  return num(data().root?.reclaim?.tokens) > 0
+                },
+                get children() {
+                  return mutedText(() => reclaimLine())
+                },
+              }),
+              comp(Show, {
+                get when() {
+                  return messages().available
+                },
+                get children() {
+                  return [
+                    baseText(() => "largest contributors (measured)"),
+                    comp(Show, {
+                      get when() {
+                        return contributors().length > 0
+                      },
+                      get fallback() {
+                        return mutedText(() => "  no messages yet")
+                      },
+                      get children() {
+                        return contributors()
+                          .slice(0, 5)
+                          .map((contributor, i) =>
+                            mutedText(() => contributorLine(contributor, i + 1)),
+                          )
+                      },
+                    }),
+                    mutedText(
+                      () =>
+                        "measured != server categories: contributors attribute " +
+                        "outputs per tool call; the server's toolOut category " +
+                        "only totals them",
+                    ),
+                  ]
+                },
+              }),
+              comp(Show, {
+                get when() {
+                  return byToolLine().length > 0
+                },
+                get children() {
+                  return [
+                    baseText(() => "tool results by tool"),
+                    mutedText(() => byToolLine()),
+                  ]
+                },
+              }),
+            ]
+          },
+        }),
+      ]
+    },
+  })
 }

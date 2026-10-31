@@ -3,9 +3,11 @@
  *
  * Checks performed:
  *   (a) tarball composition (base files + lib/ + docs/ + dist/, no dev artifacts)
- *   (b) tui.tsx transpiles with the Solid pragma intact
- *   (c) resolve chain - @opentui/solid + solid-js resolvable from tui.tsx context
- *   (d) unit-harness T1-T36 for the limit/agent/state/command/Desktop-RPC fixes
+ *   (b) TUI sources are JSX-free (no .tsx, no pragma) and import only modules
+ *       the opencode TUI loader bridges (keeps npm installs live, #33884)
+ *   (c) resolve chain - host-bridged modules resolve, local imports exist, and
+ *       none of them is a production dependency (no duplicate instance)
+ *   (d) unit-harness T1-T37 for the limit/agent/state/command/Desktop-RPC fixes
  *   (e) corporate-identifier scan (lib/, gui/, test/ and the published surface)
  *   (f) non-English scan - no non-ASCII letters (any language other than
  *       English) anywhere in the published surface or the test tree
@@ -21,9 +23,11 @@ import { transformSync } from "esbuild";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { createRequire } from "node:module";
 
 // repoRoot = parent of the test/ directory (where package.json lives)
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+const importScan = createRequire(import.meta.url)("./lib/import-scan.cjs");
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -41,15 +45,15 @@ const declaredFiles = pkgMeta.files || [];
 // Expand any directory-wildcard entries to their expected member(s).
 // e.g. "lib/" -> every regular file under lib/; "docs/" -> every member under
 // that prefix (the README screenshot). The base published set is
-// LICENSE, README.md, index.js, package.json, tui.tsx, CHANGELOG.md (6 files);
+// LICENSE, README.md, index.js, package.json, tui.ts, CHANGELOG.md (6 files);
 // the lib/ and
 // docs/ member counts are computed from the directories so module splits and
 // added screenshots are reflected automatically instead of needing a hardcoded
 // number.
-// Base files in `files[]` outside lib/ (index.js, package.json, tui.tsx,
+// Base files in `files[]` outside lib/ (index.js, package.json, tui.ts,
 // README.md, CHANGELOG.md, LICENSE).
 const BASE_MEMBER_COUNT = 6;
-const fileMembers = new Set(["LICENSE","README.md","index.js","package.json","tui.tsx"]);
+const fileMembers = new Set(["LICENSE","README.md","index.js","package.json","tui.ts"]);
 let libMemberCount = 0;
 let docsMemberCount = 0;
 let distMemberCount = 0;
@@ -144,7 +148,23 @@ if (missingExports.length) {
 pass(`tarball: ${[...fileMembers].join(", ")} (${fileMembers.size} members, no dev artifacts)`);
 
 // ---------------------------------------------------------------------------
-// (b) tui.tsx transpilation — pragma regression check
+// (b) TUI sources — no JSX, no pragma, host-bridgeable imports
+//
+// OpenCode installs npm plugins inside a `node_modules` tree, where the host
+// SKIPS the Solid/Babel JSX transform (sourceFilter in
+// @opentui/solid/scripts/solid-plugin.js; upstream anomalyco/opencode#33884).
+// A JSX file in that position is compiled by Bun's plain transform instead and
+// then needs `@opentui/solid` installed next to it just to resolve the emitted
+// jsx-runtime import; the mounted slot renders once and freezes. The fix is
+// structural: the package ships NO JSX at all and builds every tree with
+// jsx() + getter props (lib/tui-h.ts), so the host's runtime-module rewrite of
+// the literal `@opentui/solid/jsx-runtime` import keeps the surfaces live for
+// npm installs too. These checks keep that invariant enforceable:
+//   - no .tsx/.jsx file anywhere in the TUI surface (package root + lib/),
+//   - every TUI source parses with esbuild loader "ts" (JSX syntax fails),
+//   - no `@jsx*` pragma anywhere (only a JSX file would need one),
+//   - imports stay inside the host-bridgeable allowlist,
+//   - no react/jsx-runtime in the output.
 //
 // Uses the esbuild PROGRAMMATIC API (transformSync), never `node <cli-bin>`.
 // The API resolves the native binary from `@esbuild/<platform>` and spawns it
@@ -154,60 +174,128 @@ pass(`tarball: ${[...fileMembers].join(", ")} (${fileMembers.size} members, no d
 // native ELF binary — node then parses it as JS and throws
 // `SyntaxError: Invalid or unexpected token`.
 // ---------------------------------------------------------------------------
-console.log("\n(b) tui.tsx + lib/*.tsx transpilation (esbuild transform, jsx=automatic)...");
-// The npm path relies on each TUI file's own line-1 pragma (the host skips the
-// Solid transform for node_modules paths), so EVERY .tsx of the entry — the
-// file itself and the imported components — must carry the pragma and compile
-// against @opentui/solid/jsx-runtime. A regression in any one of them would
-// ship undetected otherwise.
-const tsxFiles = [
-  "tui.tsx",
+console.log("\n(b) TUI sources: no JSX, no pragma, host-bridgeable imports...");
+
+// The import rules are shared with gate (c) (test/lib/import-scan.cjs) so the
+// two gates cannot drift apart on what "an import the host can provide" means.
+const {
+  isBuiltin,
+  isRelative,
+  isHostBridged,
+  hasFileExtension,
+  importSpecifiersOf,
+} = importScan;
+const isAllowedImport = (spec) =>
+  isBuiltin(spec) || isRelative(spec) || isHostBridged(spec);
+
+const jsxSources = [];
+for (const dir of ["", "lib"]) {
+  const abs = dir ? join(repoRoot, dir) : repoRoot;
+  for (const ent of readdirSync(abs, { withFileTypes: true })) {
+    if (!ent.isFile()) continue;
+    if (/\.(?:tsx|jsx)$/.test(ent.name)) {
+      jsxSources.push(dir ? `${dir}/${ent.name}` : ent.name);
+    }
+  }
+}
+if (jsxSources.length) {
+  fatal(
+    `JSX source file(s) in the TUI surface: ${jsxSources.join(", ")}. ` +
+      `OpenCode skips the Solid transform under node_modules (#33884), so a JSX ` +
+      `file freezes the npm-installed sidebar. Build the tree with ` +
+      `jsx()/getter props from lib/tui-h.ts instead.`,
+  );
+}
+
+const tuiSources = [
+  "tui.ts",
   ...readdirSync(join(repoRoot, "lib"))
-    .filter((f) => f.endsWith(".tsx"))
+    .filter((f) => f.endsWith(".ts") && !f.endsWith(".d.ts"))
     .sort()
     .map((f) => join("lib", f)),
 ];
 let checked = 0;
-for (const rel of tsxFiles) {
+let jsxRuntimeImports = 0;
+for (const rel of tuiSources) {
   const source = readFileSync(join(repoRoot, rel), "utf8");
+
+  // A `@jsx*` pragma only makes sense in a JSX file; here it is a regression
+  // marker (and would drag @opentui/solid back into production dependencies).
+  // The leading `*` covers the classic multi-line docblock form
+  // (`/*` on one line, ` * @jsxImportSource ...` on the next), which Bun still
+  // sees as a pragma in the first comment of the file.
+  const lines = source.split("\n");
+  const pragmaAt = lines.findIndex((line) =>
+    /^\s*(?:\*|\/\*+|\/\/)+\s*@jsx/.test(line),
+  );
+  if (pragmaAt >= 0) {
+    fatal(
+      `${rel}:${pragmaAt + 1}: JSX pragma found — the TUI surface must stay ` +
+        `JSX-free (see lib/tui-h.ts)`,
+    );
+  }
 
   let transpiled;
   try {
-    transpiled = transformSync(source, {
-      loader: "tsx",
-      jsx: "automatic",
-      format: "esm",
-    }).code;
+    // loader "ts" (NOT "tsx"): JSX syntax is a hard error here, which is
+    // exactly the invariant that keeps npm installs live.
+    transpiled = transformSync(source, { loader: "ts", format: "esm" }).code;
   } catch (e) {
-    fatal(`esbuild failed for ${rel}: ${((e && e.message) || String(e)).slice(0, 300)}`);
-  }
-  if (!transpiled.includes("@opentui/solid/jsx-runtime")) {
-    fatal(`${rel}: transpiled output missing @opentui/solid/jsx-runtime — pragma may be missing`);
+    fatal(
+      `${rel}: not valid JSX-free TypeScript: ` +
+        `${((e && e.message) || String(e)).slice(0, 300)}`,
+    );
   }
   if (transpiled.includes("react/jsx-runtime")) {
-    fatal(`${rel}: transpiled output contains react/jsx-runtime — pragma regression detected`);
+    fatal(`${rel}: transpiled output contains react/jsx-runtime`);
   }
-  // Bare `opencode` specifiers (e.g. `import "opencode/process"`) are NOT bridged
-  // by the opencode TUI runtime loader: ensureRuntimePluginSupport only remaps
-  // `@opencode/plugin/tui` to the synthetic host module. A bare specifier resolves
-  // to package `opencode`, which exists only inside the opencode monorepo, so the
-  // real TUI throws `Cannot find package 'opencode'`. Guard against reintroducing
-  // one. The quote anchor excludes the legitimate `@opencode/*` scoped imports.
-  if (/["']opencode(\/|["'])/.test(transpiled)) {
-    fatal(`${rel}: transpiled output imports a bare 'opencode' specifier — not bridged at runtime`);
-  }
-  const firstLine = source.split("\n")[0];
-  if (!firstLine.startsWith("/** @jsxImportSource @opentui/solid */")) {
-    fatal(`${rel}: first line is not the pragma: ${firstLine}`);
+
+  for (const spec of importSpecifiersOf(source)) {
+    if (!isAllowedImport(spec)) {
+      fatal(
+        `${rel}: import "${spec}" is not bridged by the opencode TUI loader. ` +
+          `Allowed: node:*, bun:*, relative paths, @opencode/plugin/tui, ` +
+          `@opentui/solid*, solid-js[/store].`,
+      );
+    }
+    // The host walks the import graph with import.meta.resolve(specifier,
+    // importer), which never probes extensions: an extensionless relative
+    // import is not followed, so that file is left WITHOUT the runtime-module
+    // rewrite loader and the npm install fails with
+    // `Cannot find package '@opentui/solid'` (found exactly this way in
+    // test/e2e-tui.mjs Check C).
+    if (isRelative(spec) && !hasFileExtension(spec)) {
+      fatal(
+        `${rel}: relative import "${spec}" has no file extension — the host ` +
+          `rewrite walk does not resolve extensionless imports, so that file ` +
+          `would keep a literal jsx-runtime import and break npm installs. ` +
+          `Write "${spec}.ts" (or .js).`,
+      );
+    }
+    if (spec === "@opentui/solid/jsx-runtime") jsxRuntimeImports++;
   }
   checked++;
 }
-pass(`pragma intact in ${checked} tsx file(s): @opentui/solid/jsx-runtime present, react absent`);
+if (jsxRuntimeImports === 0) {
+  fatal(
+    `no static "@opentui/solid/jsx-runtime" import in any TUI source — ` +
+      `lib/tui-h.ts must import it literally so the host can rewrite it`,
+  );
+}
+pass(
+  `${checked} JSX-free TUI source(s) parsed with loader "ts"; ` +
+    `imports bridged, ${jsxRuntimeImports} literal jsx-runtime import(s), react absent`,
+);
 
 // ---------------------------------------------------------------------------
-// (c) resolve chain — @opentui/solid + solid-js resolvable from tui.tsx context
+// (c) resolve chain — what the TUI sources import, and where it comes from
+//
+// The TUI surface must get @opentui/solid/jsx-runtime, solid-js and
+// @opencode/plugin/tui from the HOST (one shared instance each) and every
+// other import from node builtins or a file we ship. resolve-bridge.cjs walks
+// the actual sources, so a new import cannot silently escape the gate.
 // ---------------------------------------------------------------------------
-console.log("\n(c) resolve chain — @opentui/solid + solid-js...");
+console.log("\n(c) resolve chain — host-bridged modules + local imports...");
 {
   // FIX Critical: execSync has NO { args } option — use spawnSync.
   // resolve-bridge.cjs is self-contained (uses CJS __dirname internally).
@@ -226,8 +314,8 @@ console.log("\n(c) resolve chain — @opentui/solid + solid-js...");
     }
     fatal(`resolve-bridge.cjs failed (exit ${r.status}): ${out.slice(0, 200)}`);
   }
-  console.log(`  ✓ @opentui/solid/jsx-runtime resolved`);
-  console.log(`  ✓ solid-js resolved`);
+  console.log(`  ✓ every TUI import resolves (host-bridged or shipped file)`);
+  console.log(`  ✓ no host-bridged module in production dependencies`);
 }
 
 // ---------------------------------------------------------------------------
@@ -236,7 +324,7 @@ console.log("\n(c) resolve chain — @opentui/solid + solid-js...");
 console.log("\n(d) Unit harness T1–T12 + T13+...");
 
 // FIX Major 3 (env-gate): use an ISOLATED state file — never touch the live
-// <tmpdir>/opencode-context-indicator-state.json.  Both index.js and tui.tsx
+// <tmpdir>/opencode-context-indicator-state.json.  Both index.js and tui.ts
 // honour OPENCODE_CONTEXT_INDICATOR_STATE_FILE.  We write the seed BEFORE
 // import so hydrateModelLimitsFromState() finds it at parse time.
 // No backup/restore of the live file is needed.
@@ -2588,12 +2676,82 @@ check("T32 client-context fallback never shadows hook-measured categories", () =
   });
 }
 
+// T37 - the denominator rule from opencode 2.2.5 (#60660). Core's inputWindow()
+// is `input && context ? min(input, context) : input || context`: a provider
+// that reports an input limit ABOVE the context window cannot use it in full,
+// because the context also holds the reply. Before 2.2.5 the plugin used
+// `input || context`, which overstated the window (and printed a compact-at
+// point the host never reaches). These records are seeded directly so the rule
+// is covered even if the state fixture changes.
+{
+  const t37Seed = (modelID, rec) =>
+    mod.modelLimits.set(`test-provider:${modelID}`, rec);
+  const t37Keys = [];
+  try {
+    t37Seed("model-window-cap", { context: 200000, input: 300000 });
+    t37Keys.push("test-provider:model-window-cap");
+    t37Seed("model-input-smaller", { context: 200000, input: 100000 });
+    t37Keys.push("test-provider:model-input-smaller");
+    t37Seed("model-input-only", { context: 0, input: 200000 });
+    t37Keys.push("test-provider:model-input-only");
+    t37Seed("model-context-only", { context: 200000, input: 0 });
+    t37Keys.push("test-provider:model-context-only");
+    t37Seed("model-window-equal", { context: 200000, input: 200000 });
+    t37Keys.push("test-provider:model-window-equal");
+
+    check("T37 min(input, context): an input limit above the context window is capped", () => {
+      const info = mod.getUsableContext("test-provider", "model-window-cap");
+      // input alone would give window 300000 -> reserve 45000 -> usable 255000;
+      // the host caps at 200000 -> reserve 30000 -> usable 170000.
+      assert(info?.limit === 200000, `window must be min(300000, 200000), got ${info?.limit}`);
+      assert(info?.reserved === 30000, `reserve must be 15% of the capped window, got ${info?.reserved}`);
+      assert(info?.usable === 170000, `usable must be 170000, got ${info?.usable}`);
+    });
+
+    check("T37 min(input, context): a smaller input limit still wins", () => {
+      const info = mod.getUsableContext("test-provider", "model-input-smaller");
+      assert(info?.limit === 100000, `window must be min(100000, 200000), got ${info?.limit}`);
+      // 100000 < 2 * 16000, so the floor applies: 100000 - 16000.
+      assert(info?.reserved === 16000, `reserve must be RESERVE_MIN, got ${info?.reserved}`);
+      assert(info?.usable === 84000, `usable must be 84000, got ${info?.usable}`);
+    });
+
+    check("T37 min(input, context): single-sided limits are unchanged", () => {
+      const inputOnly = mod.getUsableContext("test-provider", "model-input-only");
+      assert(
+        inputOnly?.limit === 200000 && inputOnly?.usable === 170000,
+        `input-only must still use 200000, got ${inputOnly?.limit}/${inputOnly?.usable}`,
+      );
+      const contextOnly = mod.getUsableContext("test-provider", "model-context-only");
+      assert(
+        contextOnly?.limit === 200000 && contextOnly?.usable === 170000,
+        `context-only must still use 200000, got ${contextOnly?.limit}/${contextOnly?.usable}`,
+      );
+      const equal = mod.getUsableContext("test-provider", "model-window-equal");
+      assert(
+        equal?.limit === 200000 && equal?.usable === 170000,
+        `equal limits must be 200000, got ${equal?.limit}/${equal?.usable}`,
+      );
+    });
+
+    check("T37 min(input, context): the buffer override applies to the capped window", () => {
+      const info = mod.getUsableContext("test-provider", "model-window-cap", 50000);
+      // The cap happens first; 50000 < 200000 so the override replaces the share.
+      assert(info?.limit === 200000, `window must stay capped, got ${info?.limit}`);
+      assert(info?.reserved === 50000, `override must replace the reserve, got ${info?.reserved}`);
+      assert(info?.usable === 150000, `usable must be 200000 - 50000, got ${info?.usable}`);
+    });
+  } finally {
+    for (const key of t37Keys) mod.modelLimits.delete(key);
+  }
+}
+
 if (failed) fatal(`${failed} unit test(s) failed`);
-pass(`all ${ranChecks} unit checks passed (T1-T12 + T13-T36)`);
+pass(`all ${ranChecks} unit checks passed (T1-T12 + T13-T37)`);
 
 // ---------------------------------------------------------------------------
 // (e) corporate-identifier scan — no employer/vendor-specific names may appear
-// in the published surface (index.js, tui.tsx, lib/, README.md, package.json)
+// in the published surface (index.js, tui.ts, lib/, README.md, package.json)
 // or anywhere in the test tree.  The pattern is assembled from string
 // fragments so this guard's own source cannot trip the check it performs.
 // ---------------------------------------------------------------------------
@@ -2604,7 +2762,7 @@ const FORBIDDEN = new RegExp(
 );
 const scanFiles = [
   "index.js",
-  "tui.tsx",
+  "tui.ts",
   "README.md",
   "package.json",
   "CHANGELOG.md",
