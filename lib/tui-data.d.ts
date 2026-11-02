@@ -54,6 +54,16 @@ export interface StateEntry {
 
 export declare const STATE_FILE: string
 export declare const POLL_MS: number
+export interface ComposerStatus {
+  percent: number
+  label: string
+  tone?: "warning" | "danger"
+}
+export declare const COMPOSER_WARN_PERCENT: number
+export declare const COMPOSER_DANGER_PERCENT: number
+export declare function composerStatus(
+  entry: StateEntry | null | undefined,
+): ComposerStatus | null
 export declare function readSnapshot(): Record<string, StateEntry>
 export declare function collectFamily(
   snapshot: Record<string, StateEntry>,

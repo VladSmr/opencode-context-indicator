@@ -176,6 +176,7 @@ import {
   hydrateModelLimitsFromState,
   modelLimits,
   reserveFor,
+  resetConfiguredBufferCache,
 } from "./lib/limits.js";
 import { breakdownCache, lastKnownCacheRead, lastKnownCacheWrite, lastKnownCtxCache, lastKnownInputCache, lastKnownReasoningCache, sessionAgentCache, sessionParentCache } from "./lib/cache.js";
 import { registerDesktopRpc, toDesktopRow } from "./lib/desktop.js";
@@ -202,6 +203,7 @@ export {
   getUsableContext,
   getModelLimit,
   reserveFor,
+  resetConfiguredBufferCache,
   collectSessionReport,
   renderSessionRow,
   renderBreakdownTable,
@@ -248,9 +250,10 @@ export default {
   id: "context-indicator",
   async setup(ctx) {
     const registrations = [];
+
     try {
       registrations.push(
-        await ctx.session.hook("context", (context) => onV2Context(context)),
+        await ctx.session.hook("context", (context) => onV2Context(context, ctx)),
       );
     } catch (err) {
       logErr("v2 context hook registration failed", err);
@@ -263,7 +266,7 @@ export default {
     // still marks the entry stale.
     try {
       registrations.push(
-        await ctx.session.hook("compaction", (context) => onV2Compaction(context)),
+        await ctx.session.hook("compaction", (context) => onV2Compaction(context, ctx)),
       );
     } catch (err) {
       logErr("v2 compaction hook registration failed", err);

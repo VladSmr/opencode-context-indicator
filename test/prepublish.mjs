@@ -7,7 +7,7 @@
  *       the opencode TUI loader bridges (keeps npm installs live, #33884)
  *   (c) resolve chain - host-bridged modules resolve, local imports exist, and
  *       none of them is a production dependency (no duplicate instance)
- *   (d) unit-harness T1-T37 for the limit/agent/state/command/Desktop-RPC fixes
+ *   (d) unit-harness T1-T39 for the limit/agent/state/command/Desktop-RPC fixes
  *   (e) corporate-identifier scan (lib/, gui/, test/ and the published surface)
  *   (f) non-English scan - no non-ASCII letters (any language other than
  *       English) anywhere in the published surface or the test tree
@@ -18,7 +18,7 @@
  */
 
 import { execSync, spawnSync } from "node:child_process";
-import { readFileSync, writeFileSync, unlinkSync, existsSync, readdirSync } from "node:fs";
+import { readFileSync, writeFileSync, unlinkSync, existsSync, readdirSync, mkdirSync, rmSync } from "node:fs";
 import { transformSync } from "esbuild";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -476,6 +476,11 @@ process.env.OPENCODE_CONTEXT_INDICATOR_STATE_FILE = HARNESS_STATE;
 // Same isolation for the human-readable log: idle/compacted handlers rewrite
 // it, so point them at a throwaway file instead of the user's real one.
 process.env.OPENCODE_CONTEXT_INDICATOR_LOG_FILE = join(tmpdir(), "oci-prepublish-log.log");
+// The limits path now also honours the user's configured `compaction.buffer`.
+// Point the global lookup at an empty throwaway tree BEFORE importing index.js
+// so a developer's own config can never change the expected 15% reserves
+// (T7/T16/T25/T37). T38 overrides this again and restores it afterwards.
+process.env.XDG_CONFIG_HOME = join(tmpdir(), `oci-prepublish-xdg-${process.pid}`);
 
 const mod  = await import(pathToFileURL(join(repoRoot, "index.js")).href);
 const read = () => JSON.parse(readFileSync(HARNESS_STATE, "utf8"));
@@ -2746,8 +2751,199 @@ check("T32 client-context fallback never shadows hook-measured categories", () =
   }
 }
 
+// ---------------------------------------------------------------------------
+// T38 - configured compaction.buffer (opencode 2.2.5+).
+//
+// The plugin API exposes no config object, so lib/config.js reads the user's
+// own JSONC/JSON file. Covered here: the comment stripper (string-aware), the
+// percent/token conversion, the project-over-global precedence, and the wiring
+// into getUsableContext (an explicit argument and the env var still win).
+// Everything runs against a throwaway XDG_CONFIG_HOME; the live user config is
+// never touched.
+// ---------------------------------------------------------------------------
+{
+  const configMod = await import(
+    pathToFileURL(join(repoRoot, "lib", "config.js")).href
+  );
+  const savedXdg = process.env.XDG_CONFIG_HOME;
+  const savedEnvBuffer = process.env.OPENCODE_CONTEXT_INDICATOR_COMPACT_BUFFER;
+  const cfgRoot = join(tmpdir(), `oci-t38-${process.pid}-${Date.now()}`);
+  const globalDir = join(cfgRoot, "opencode");
+  const projectDir = join(globalDir, "project-fixture");
+  const writeCfg = (dir, name, body) => {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, name), body, "utf8");
+  };
+  const resetAll = () => {
+    configMod.resetConfigCache();
+    mod.resetConfiguredBufferCache();
+  };
+  try {
+    delete process.env.OPENCODE_CONTEXT_INDICATOR_COMPACT_BUFFER;
+    // Same directory as the project fixture keeps the walk deterministic: it is
+    // a subdirectory of the global dir, which the resolver never scans.
+    writeCfg(projectDir, "opencode.jsonc", "{}");
+    process.env.XDG_CONFIG_HOME = cfgRoot;
+
+    check("T38 stripJsonc: comments outside strings, strings with // and /* survive", () => {
+      const text = [
+        "{",
+        '  // line comment',
+        '  "a": "http://x/*y*/", // trailing',
+        "  /* block",
+        '     comment */ "b": 1,',
+        "}",
+      ].join("\n");
+      const parsed = JSON.parse(configMod.stripJsonc(text));
+      assert(
+        parsed.a === "http://x/*y*/" && parsed.b === 1,
+        `stripper damaged a string value: ${JSON.stringify(parsed)}`,
+      );
+    });
+
+    check("T38 stripJsonc: trailing commas are tolerated, string values untouched", () => {
+      const parsed = JSON.parse(configMod.stripJsonc('{"a":[1,2,],"b":2,}'));
+      assert(parsed.a.length === 2 && parsed.b === 2, "trailing commas not removed");
+      // A comma directly before `}` INSIDE a string must not be dropped.
+      const str = JSON.parse(configMod.stripJsonc('{"cmd":"x,}","n":1}'));
+      assert(str.cmd === "x,}", `a string value was rewritten: ${JSON.stringify(str.cmd)}`);
+    });
+
+    check("T38 bufferTokens: percentages and token counts", () => {
+      assert(configMod.bufferTokens(200000, "20%") === 40000, "20% of 200000 must be 40000");
+      assert(configMod.bufferTokens(200000, "12.5%") === 25000, "12.5% must round to 25000");
+      assert(configMod.bufferTokens(200000, "99%") === 198000, "99% must be 198000");
+      assert(configMod.bufferTokens(200000, 30000) === 30000, "a token count passes through");
+    });
+
+    check("T38 bufferTokens: invalid shapes are ignored, like core", () => {
+      for (const bad of ["0%", "100%", "120%", "abc", " 20%", "20", -1, 1.5, 5e9, 1.5e300, null, {}]) {
+        assert(
+          configMod.bufferTokens(200000, bad) === undefined,
+          `must reject ${String(bad)}`,
+        );
+      }
+    });
+
+    check("T38 resolveCompactionBuffer: project beats global, per-file JSONC", () => {
+      writeCfg(globalDir, "opencode.jsonc", '{\n  // global\n  "compaction": { "buffer": "10%" },\n}\n');
+      resetAll();
+      let resolved = configMod.resolveCompactionBuffer();
+      assert(resolved.value === "10%", `global buffer expected, got ${String(resolved.value)}`);
+      writeCfg(projectDir, "opencode.jsonc", '{ "compaction": { "buffer": 30000 } }');
+      resolved = configMod.resolveCompactionBuffer(projectDir);
+      assert(resolved.value === 30000, `project buffer must win, got ${String(resolved.value)}`);
+      // A project file WITHOUT a buffer must not shadow the global setting.
+      writeCfg(projectDir, "opencode.jsonc", '{ "model": "model-alpha" }');
+      resolved = configMod.resolveCompactionBuffer(projectDir);
+      assert(resolved.value === "10%", `global must survive an unrelated project file, got ${String(resolved.value)}`);
+    });
+
+    check("T38 getUsableContext applies the configured percentage buffer", () => {
+      mod.modelLimits.set("test-provider:model-configured", { context: 200000, input: 0, output: 32000 });
+      writeCfg(globalDir, "opencode.jsonc", '{ "compaction": { "buffer": "20%" } }');
+      resetAll();
+      const info = mod.getUsableContext("test-provider", "model-configured");
+      assert(info?.reserved === 40000, `reserve must be 20% of 200000, got ${info?.reserved}`);
+      assert(info?.usable === 160000, `usable must be 160000, got ${info?.usable}`);
+    });
+
+    check("T38 getUsableContext: project buffer and env override win in order", () => {
+      mod.modelLimits.set("test-provider:model-configured", { context: 200000, input: 0, output: 32000 });
+      writeCfg(globalDir, "opencode.jsonc", '{ "compaction": { "buffer": "20%" } }');
+      writeCfg(projectDir, "opencode.jsonc", '{ "compaction": { "buffer": 50000 } }');
+      resetAll();
+      let info = mod.getUsableContext("test-provider", "model-configured", undefined, projectDir);
+      assert(info?.reserved === 50000, `project buffer must win over global, got ${info?.reserved}`);
+      process.env.OPENCODE_CONTEXT_INDICATOR_COMPACT_BUFFER = "30000";
+      info = mod.getUsableContext("test-provider", "model-configured", undefined, projectDir);
+      assert(info?.reserved === 30000, `env must win over the config, got ${info?.reserved}`);
+      delete process.env.OPENCODE_CONTEXT_INDICATOR_COMPACT_BUFFER;
+      info = mod.getUsableContext("test-provider", "model-configured", 10000, projectDir);
+      assert(info?.reserved === 10000, `an explicit argument must win, got ${info?.reserved}`);
+    });
+
+    // One server process can host several plugin instances (one per location).
+    // The buffer cache is keyed by directory, so two projects must never see
+    // each other's `compaction.buffer` in the same second.
+    check("T38 two projects do not leak buffers into each other", () => {
+      mod.modelLimits.set("test-provider:model-configured", { context: 200000, input: 0, output: 32000 });
+      const otherDir = join(cfgRoot, "other-project");
+      writeCfg(globalDir, "opencode.jsonc", '{ "compaction": { "buffer": "20%" } }');
+      writeCfg(projectDir, "opencode.jsonc", '{ "compaction": { "buffer": 50000 } }');
+      writeCfg(otherDir, "opencode.jsonc", '{ "compaction": { "buffer": "10%" } }');
+      resetAll();
+      const a = mod.getUsableContext("test-provider", "model-configured", undefined, projectDir);
+      const b = mod.getUsableContext("test-provider", "model-configured", undefined, otherDir);
+      const again = mod.getUsableContext("test-provider", "model-configured", undefined, projectDir);
+      assert(a?.reserved === 50000, `project A must keep its own buffer, got ${a?.reserved}`);
+      assert(b?.reserved === 20000, `project B must use 10%, got ${b?.reserved}`);
+      assert(again?.reserved === 50000, `project A must not inherit B's buffer, got ${again?.reserved}`);
+      const globalOnly = mod.getUsableContext("test-provider", "model-configured");
+      assert(globalOnly?.reserved === 40000, `no directory must mean global only, got ${globalOnly?.reserved}`);
+    });
+
+    check("T38 a buffer >= the window falls back to the default share", () => {
+      mod.modelLimits.set("test-provider:model-configured", { context: 200000, input: 0, output: 32000 });
+      writeCfg(globalDir, "opencode.jsonc", '{ "compaction": { "buffer": 200000 } }');
+      resetAll();
+      const info = mod.getUsableContext("test-provider", "model-configured");
+      assert(info?.reserved === 30000, `a >= window buffer must be ignored, got ${info?.reserved}`);
+    });
+  } finally {
+    mod.modelLimits.delete("test-provider:model-configured");
+    if (savedXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = savedXdg;
+    if (savedEnvBuffer === undefined) delete process.env.OPENCODE_CONTEXT_INDICATOR_COMPACT_BUFFER;
+    else process.env.OPENCODE_CONTEXT_INDICATOR_COMPACT_BUFFER = savedEnvBuffer;
+    resetAll();
+    try {
+      rmSync(cfgRoot, { recursive: true, force: true });
+    } catch {
+      /* best-effort cleanup of the throwaway config tree */
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// T39 - the TUI composer capsule (`prompt.footer.status`): thresholds and the
+// null cases, shared with the Desktop pill (65% amber / 85% red).
+// ---------------------------------------------------------------------------
+{
+  const dataMod = await import(
+    pathToFileURL(join(repoRoot, "lib", "tui-data.js")).href
+  );
+
+  check("T39 composerStatus: no window -> no capsule", () => {
+    assert(dataMod.composerStatus(null) === null, "null entry must be null");
+    assert(dataMod.composerStatus({}) === null, "an entry without counters must be null");
+    assert(dataMod.composerStatus({ ctx: 1000, usable: 0 }) === null, "usable 0 must be null");
+    assert(dataMod.composerStatus({ ctx: 1000, usable: null }) === null, "null usable must be null");
+  });
+
+  check("T39 composerStatus: label and thresholds", () => {
+    const calm = dataMod.composerStatus({ ctx: 90000, usable: 200000 });
+    assert(calm.label === "45% ctx", `label must be 45% ctx, got ${calm?.label}`);
+    assert(calm.tone === undefined, `45% must stay neutral, got ${calm?.tone}`);
+    const warn = dataMod.composerStatus({ ctx: 130000, usable: 200000 });
+    assert(warn.label === "65% ctx" && warn.tone === "warning", `65% must be amber, got ${warn?.label}/${warn?.tone}`);
+    const danger = dataMod.composerStatus({ ctx: 170000, usable: 200000 });
+    assert(danger.label === "85% ctx" && danger.tone === "danger", `85% must be red, got ${danger?.label}/${danger?.tone}`);
+    const over = dataMod.composerStatus({ ctx: 240000, usable: 200000 });
+    assert(over.percent === 120 && over.tone === "danger", `120% must stay honest and red, got ${over?.percent}/${over?.tone}`);
+  });
+
+  check("T39 composerStatus: rounding matches the displayed percent", () => {
+    const edge = dataMod.composerStatus({ ctx: 169200, usable: 200000 }); // 84.6%
+    assert(edge.percent === 85, `84.6% must round to 85, got ${edge?.percent}`);
+    // The tone compares the RAW share (like the Desktop pill), so 84.6% rounds
+    // up in the label while still showing the warning colour.
+    assert(edge.tone === "warning", `84.6% must stay warning, got ${edge?.tone}`);
+  });
+}
+
 if (failed) fatal(`${failed} unit test(s) failed`);
-pass(`all ${ranChecks} unit checks passed (T1-T12 + T13-T37)`);
+pass(`all ${ranChecks} unit checks passed (T1-T12 + T13-T39)`);
 
 // ---------------------------------------------------------------------------
 // (e) corporate-identifier scan — no employer/vendor-specific names may appear

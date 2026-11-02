@@ -4,6 +4,35 @@ Notable user-facing changes per release. Dates are commit days (UTC).
 The package also ships a dual V1/V2 plugin — see the README for the surface
 matrix; everything below concerns the V2 path unless stated otherwise.
 
+## 1.9.0 — 2026-10-31
+
+- **The configured `compaction.buffer` is honoured.** opencode 2.2.5 accepts a
+  token count or a percentage (`"compaction": { "buffer": "20%" }`) and applies
+  it as the reserve below the window; the plugin API exposes no config object, so
+  the plugin now reads the user's own `opencode.jsonc` / `opencode.json` from
+  `~/.config/opencode` (or `$XDG_CONFIG_HOME`) and from the project directory,
+  project winning over global. The JSONC reader is a small in-file scanner (no
+  runtime dependency): comments and trailing commas are tolerated, string values
+  containing `//` or `/*` survive. A percentage is converted exactly like core
+  (`Math.round(window * pct / 100)`); an out-of-range or unparsable value is
+  ignored, and so is a buffer that is not smaller than the window - the 15%
+  default stays in that case. `OPENCODE_CONTEXT_INDICATOR_COMPACT_BUFFER` and an
+  explicit argument still win over the config. The lookup is scoped to the
+  calling instance's project directory: one server process that hosts several
+  locations never applies one project's buffer to another. The "compact at"
+  line, the percentages and the sidebar header all follow the configured buffer.
+- **A usage capsule inside the TUI composer** (`prompt.footer.status`). The
+  percentage is now visible while typing, without opening the sidebar or the
+  full-screen `/cx` panel: `38% ctx`, neutral below 65 %, amber from 65 %, red
+  from 85 % of the usable window - the same thresholds as the Desktop pill.
+  With the host's `showDetails` toggle on it also prints `ctx/usable`; it is
+  hidden in shell mode. A host without the slot renders no capsule and keeps
+  every other surface.
+- Unit harness extended to T38 (config reading: JSONC stripping, project/global
+  precedence, percent and token conversion, env/argument priority, the
+  not-smaller-than-window rule) and T39 (composer thresholds and null cases),
+  102 checks in total.
+
 ## 1.8.0 — 2026-10-31
 
 - **The TUI sidebar and the `/cx` panel are live for npm installs too**

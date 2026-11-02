@@ -11,6 +11,7 @@
 // This file is the ENTRY + setup wiring only. The components and the data layer
 // live in lib/:
 //   - lib/tui-sidebar.ts   the `sidebar.content` slot component
+//   - lib/tui-composer.ts  the `prompt.footer.status` usage capsule
 //   - lib/tui-panel.ts     the `session.panel` component (BreakdownPanel)
 //   - lib/tui-h.ts         the jsx()/component() builders (only jsx-runtime user)
 //   - lib/tui-data.js      state.json bridge, family walk, formatting helpers
@@ -51,6 +52,7 @@ import { POLL_MS, readSnapshot } from "./lib/tui-data.js"
 import { c as comp, h } from "./lib/tui-h.ts"
 import { Sidebar } from "./lib/tui-sidebar.ts"
 import { BreakdownPanel } from "./lib/tui-panel.ts"
+import { ComposerStatus } from "./lib/tui-composer.ts"
 
 // Session-panel contribution name. Session-panel names are shared selection
 // values (not registered claims), so it MUST be plugin-prefixed to avoid
@@ -198,6 +200,26 @@ export default Plugin.define({
       }),
     )
 
+    // Always-on usage capsule inside the composer (`prompt.footer.status`,
+    // opencode 2.2.x): the percentage stays visible while the sidebar is
+    // collapsed and without opening the full-screen `/cx` panel. The slot input
+    // also carries `mode` (the pill is hidden in a shell prompt) and
+    // `showDetails` (the host's own compact/detailed toggle).
+    const unregisterComposer = registerSlot("prompt.footer.status", () =>
+      context.ui.slot({
+        append: "prompt.footer.status",
+        render: (input) => {
+          if (input?.sessionID) currentSession = input.sessionID
+          noteLive?.("slot-render prompt.footer.status")
+          return comp(ComposerStatus, {
+            entry,
+            mode: () => input?.mode ?? "normal",
+            showDetails: () => Boolean(input?.showDetails),
+          })
+        },
+      }),
+    )
+
     // The probe is ALSO mounted in the `app` slot, which the host renders even
     // when no session/sidebar is on screen (a standalone instance with no prompt
     // has no sidebar.content contribution to mount). Whichever slot mounts
@@ -277,7 +299,7 @@ export default Plugin.define({
     // loaded but REGISTERED its surfaces — a host-transform failure of this
     // file would otherwise die silently between "loading plugin" and here.
     console.log(
-      "[context-indicator] live TUI surfaces registered (sidebar + session.panel + keymap)",
+      "[context-indicator] live TUI surfaces registered (sidebar + composer + session.panel + keymap)",
     )
 
     // E2E instrumentation (only when test/e2e-tui.mjs sets the marker env):
@@ -302,6 +324,7 @@ export default Plugin.define({
       if (probeTimer) clearInterval(probeTimer)
       for (const unregister of [
         unregisterSidebar,
+        unregisterComposer,
         unregisterProbe,
         unregisterPanel,
         unregisterCommands,
