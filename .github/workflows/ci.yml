@@ -43,13 +43,15 @@ jobs:
       # file. The bundle is a build output and is not committed.
       - run: npm run build:gui
 
-      # Run the full prepublish gate (a)-(g): tarball composition (incl. the
+      # Run the full prepublish gate (a)-(h): tarball composition (incl. the
       # built dist/ bundle), the JSX-free TUI + import-allowlist check via the
       # esbuild PROGRAMMATIC API, the resolve
       # chain (host-bridged + peer packages + the local lib import), the
-      # unit harness T1-T39 (102 checks), the corporate-identifier scan and the
-      # non-English (non-ASCII letter) scan, plus the Desktop GUI bundle check
-      # (one CJS file, app-provided modules kept external).
+      # unit harness T1-T42 (111 checks), the corporate-identifier scan and the
+      # non-English (non-ASCII letter) scan, the Desktop GUI bundle check
+      # (one CJS file, app-provided modules kept external, newer than its
+      # sources), and a runtime smoke of that bundle (stubbed host modules ->
+      # setup() registers the panel, menu item, command and composer pill).
       # Single source of truth, identical on Windows and Linux: the API
       # spawns the native esbuild binary with correct executable semantics
       # instead of `node <cli-bin>`, which breaks on Linux (ELF vs JS).

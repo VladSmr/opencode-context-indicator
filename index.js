@@ -162,6 +162,8 @@ import {
   commandContextDiff,
   commandContextSummary,
   CONTEXT_BREAKDOWN_RESUME,
+  REPLY_ONLY,
+  taggedPayload,
   collectSessionReport,
   renderSessionRow,
   renderBreakdownTable,
@@ -178,7 +180,7 @@ import {
   reserveFor,
   resetConfiguredBufferCache,
 } from "./lib/limits.js";
-import { breakdownCache, lastKnownCacheRead, lastKnownCacheWrite, lastKnownCtxCache, lastKnownInputCache, lastKnownReasoningCache, sessionAgentCache, sessionParentCache } from "./lib/cache.js";
+import { breakdownCache, breakdownForModel, lastKnownCacheRead, lastKnownCacheWrite, lastKnownCtxCache, lastKnownInputCache, lastKnownReasoningCache, sessionAgentCache, sessionParentCache } from "./lib/cache.js";
 import { registerDesktopRpc, toDesktopRow } from "./lib/desktop.js";
 import {
   logErr,
@@ -209,6 +211,8 @@ export {
   renderBreakdownTable,
   renderContextDiff,
   commandContextDiff,
+  REPLY_ONLY,
+  taggedPayload,
   shortSummaryText,
   shortSummaryDescription,
   ensureModelLimits,
@@ -233,6 +237,7 @@ export {
   lastKnownCacheWrite,
   lastKnownCtxCache,
   breakdownCache,
+  breakdownForModel,
   lastKnownInputCache,
   lastKnownReasoningCache,
   handleV2Event,

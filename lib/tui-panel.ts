@@ -10,7 +10,7 @@ import { mkdirSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { basename, join } from "node:path"
 import type { StateEntry } from "./tui-data.js"
-import { collectFamily, fit, fmt, num, toolOutEntries, updatedAt } from "./tui-data.js"
+import { collectFamily, fit, fmt, num, panelLayout, toolOutEntries, updatedCell } from "./tui-data.js"
 import { token } from "./tui-theme.js"
 import { c as comp, h } from "./tui-h.ts"
 import {
@@ -121,29 +121,9 @@ function listSignature(list: unknown[]): string {
   return `${n}:${id}:${created}:${size}`
 }
 
-// Panel column layout (monospace), derived from the host-provided panel width
-// so cells never collide on narrow terminals. Gaps between columns keep a
-// truncated cell visually separated from its neighbour.
-const GUTTER = 2
-const CTX_WIDTH = 12
-const COST_WIDTH = 8
-
-function panelLayout(panelWidth: number): {
-  roleW: number
-  modelW: number
-  ctxW: number
-  costW: number
-  updW: number
-  gutter: string
-} {
-  const w = num(panelWidth) > 0 ? num(panelWidth) : 60
-  const ctxW = CTX_WIDTH
-  const costW = COST_WIDTH
-  const updW = Math.max(5, Math.min(8, w - ctxW - 4 * GUTTER - 24))
-  const roleW = Math.max(12, Math.min(20, Math.floor(w * 0.28)))
-  const modelW = Math.max(8, w - roleW - ctxW - costW - updW - 4 * GUTTER)
-  return { roleW, modelW, ctxW, costW, updW, gutter: " ".repeat(GUTTER) }
-}
+// Panel column layout lives in lib/tui-data.js (pure math) so the unit harness
+// can regression-test that the row never grows past the panel width (T42 in
+// test/prepublish.mjs).
 
 // Dollar formatting for the cost column: compact, always `$`-prefixed, `-`
 // when the host data layer has no cost for the session.
@@ -617,8 +597,7 @@ export function BreakdownPanel(props: {
       L.gutter +
       fit(money(costOf(e.sessionID)), L.costW) +
       L.gutter +
-      updatedAt(e.updatedAt) +
-      (e.compactStale === true ? " (stale)" : "")
+      updatedCell(e.updatedAt, e.compactStale === true, L.updW)
     )
   }
 
@@ -633,7 +612,7 @@ export function BreakdownPanel(props: {
       all && typeof all === "object"
         ? Object.values(all).filter((v) => num(v) > 0).length
         : 0
-    const parts = entries.map(([name, val]) => `${safeText(name)} ${fmt(val)}`)
+    const parts = entries.map(([name, val]) => `${safeText(name)} ${fmt(val)} tokens`)
     if (total > entries.length) parts.push(`+${total - entries.length} more`)
     return parts.join(" \u00b7 ")
   }
@@ -701,6 +680,14 @@ export function BreakdownPanel(props: {
                 .rows.map((e, i) =>
                   mutedText(() => row(e, i === 0)),
                 ),
+              comp(Show, {
+                get when() {
+                  return data().rows.some((e) => e.compactStale === true)
+                },
+                get children() {
+                  return mutedText(() => " * stale - compacted")
+                },
+              }),
               comp(Show, {
                 get when() {
                   return (data().root?.usable ?? 0) > 0

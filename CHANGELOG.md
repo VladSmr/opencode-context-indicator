@@ -4,7 +4,50 @@ Notable user-facing changes per release. Dates are commit days (UTC).
 The package also ships a dual V1/V2 plugin — see the README for the surface
 matrix; everything below concerns the V2 path unless stated otherwise.
 
-## 1.9.0 — 2026-10-31
+## 1.8.2 — 2026-11-03
+
+- **Model-rendered commands no longer echo the instruction.** `/context`,
+  `/context-diff` and `/context-breakdown` now deliver the payload FIRST and a
+  single short "reply with only the content above" line LAST. Models used to
+  quote the leading "Output the content ... exactly, verbatim" sentence into the
+  assistant message; with the data first there is nothing to quote before it, and
+  the trailing line is the last thing the model reads. The tags stay.
+- **The clock no longer follows the host locale.** The `updated` column, the
+  sidebar and the Desktop panel print a deterministic local `HH:MM:SS` built from
+  the Date getters instead of `toLocaleTimeString()` (AM/PM, dotted separators
+  and dropped seconds used to break the column alignment). The column is
+  width-bounded, the stale marker (`*`) is appended after fitting so it can never
+  be truncated away, the layout keeps one spare column, and the by-tool line and
+  the measured contributors carry their unit.
+- **The `/cx` panel labels its units and buckets.** Contributors read
+  `assistant 21:04 message - 50 tokens (est)` (the previous `asst.text` bucket
+  had no label), the by-tool line prints `webfetch 242.1k tokens`, and a stale
+  row is marked with ` *` plus one legend line instead of a long suffix.
+- **A model switch no longer lags behind.** Breakdown cache entries are tagged
+  with the model they were measured for. A cached or persisted split from the
+  previous model is dropped instead of being written (or reported) under the new
+  one, and the persisted categories are inherited only while model and provider
+  stay the same - an empty persisted provider counts as "not known yet", not as a
+  switch. The model-dependent aggregates (per-tool output, reclaim, top
+  consumers) are gated the same way.
+- **Desktop GUI runtime smoke in CI.** The built `dist/gui-experimental.cjs` is
+  loaded with synthetic host modules and `setup()` runs against a fake window
+  context: the four contributions must register, the tab is listed only while the
+  host stores its key, the RPC contract must be defined and the composer pill
+  must render `70% ctx` / warning from a 70-of-100 row. Text checks cannot see a
+  renamed host member; this one does (gate `h`). The bundle is also required to
+  be newer than the sources it inlines.
+- **Tombstone window shortened to 7 days** (was 30): a `state.json` entry is
+  pruned on the next write once it has been untouched for a week, so deleted
+  sessions stop lingering until the LRU cap.
+- Unit harness extended to T40 (data-first command payloads, locale-free clock,
+  stale-marker width, labelled contributors), T41 (model-scoped breakdowns, no
+  category inheritance across a model switch or a provider becoming known) and
+  T42 (the panel row width budget: the column sum never exceeds the panel, the
+  updated cell's marker columns are taken from the row, not added to it),
+  111 checks in total.
+
+## 1.8.1 — 2026-10-31
 
 - **The configured `compaction.buffer` is honoured.** opencode 2.2.5 accepts a
   token count or a percentage (`"compaction": { "buffer": "20%" }`) and applies

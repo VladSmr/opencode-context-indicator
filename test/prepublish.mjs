@@ -7,18 +7,20 @@
  *       the opencode TUI loader bridges (keeps npm installs live, #33884)
  *   (c) resolve chain - host-bridged modules resolve, local imports exist, and
  *       none of them is a production dependency (no duplicate instance)
- *   (d) unit-harness T1-T39 for the limit/agent/state/command/Desktop-RPC fixes
+ *   (d) unit-harness T1-T41 for the limit/agent/state/command/Desktop-RPC fixes
  *   (e) corporate-identifier scan (lib/, gui/, test/ and the published surface)
  *   (f) non-English scan - no non-ASCII letters (any language other than
  *       English) anywhere in the published surface or the test tree
  *   (g) Desktop GUI bundle: one CJS file, app-provided modules kept external
+ *   (h) Desktop GUI runtime smoke: the built bundle loads with stubbed host
+ *       modules and setup() registers panel/menu/command/pill
  *
  * Skip with:  npm publish --ignore-scripts
  *             (useful for testing the pack output without running checks)
  */
 
 import { execSync, spawnSync } from "node:child_process";
-import { readFileSync, writeFileSync, unlinkSync, existsSync, readdirSync, mkdirSync, rmSync } from "node:fs";
+import { readFileSync, writeFileSync, unlinkSync, existsSync, readdirSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { transformSync } from "esbuild";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -455,17 +457,17 @@ const seedState = {
   },
 };
 
-// Age-immunity refresh: the state.js tombstone prune (PRUNE_AFTER_MS = 30
+// Age-immunity refresh: the state.js tombstone prune (PRUNE_AFTER_MS = 7
 // days) would eventually eat the hardcoded 2026-09-29 seed dates and break
 // the suite. Re-stamp every seeded entry (except the T17 pair, which manages
-// its own dates) to ~10 days ago, preserving the original relative ordering
-// — T9_OLD/T9_NEW and T10_A/T10_B freshest-wins semantics stay intact.
+// its own dates) to ~2 days ago, preserving the original relative ordering
+// - T9_OLD/T9_NEW and T10_A/T10_B freshest-wins semantics stay intact.
 {
   const exempt = new Set(["ses_T17_OLD", "ses_T17_FRESH"]);
   const stampable = Object.entries(seedState)
     .filter(([k, v]) => !exempt.has(k) && Number.isFinite(Date.parse(v.updatedAt)))
     .sort((a, b) => Date.parse(a[1].updatedAt) - Date.parse(b[1].updatedAt));
-  const base = Date.now() - 10 * 86400e3;
+  const base = Date.now() - 2 * 86400e3;
   stampable.forEach(([k, v], i) => {
     seedState[k].updatedAt = new Date(base + i * 60000).toISOString();
   });
@@ -2942,8 +2944,201 @@ check("T32 client-context fallback never shadows hook-measured categories", () =
   });
 }
 
+// ---------------------------------------------------------------------------
+// T40 - model-rendered payloads: data FIRST, one trailing imperative. Models
+// used to echo the leading "Output the content ... exactly, verbatim" sentence
+// into the answer; the instruction must not sit before the data any more.
+// ---------------------------------------------------------------------------
+{
+  const tuiData = await import(
+    pathToFileURL(join(repoRoot, "lib", "tui-data.js")).href
+  );
+
+  check("T40 taggedPayload: data first, single instruction last", () => {
+    const body = "Context 10.0k / 100.0k (10%)\nmodel-alpha . 12:00:00\ncompact at 90.0k";
+    for (const tag of ["context-summary", "context-diff", "context-breakdown"]) {
+      const text = mod.taggedPayload(tag, body);
+      assert(text.startsWith(`<${tag}>\n`), `${tag}: payload must open the message`);
+      assert(text.includes(body), `${tag}: body lost`);
+      assert(text.trimEnd().endsWith(mod.REPLY_ONLY), `${tag}: instruction must be the last line`);
+      assert(
+        text.indexOf(mod.REPLY_ONLY) === text.lastIndexOf(mod.REPLY_ONLY),
+        `${tag}: the instruction must appear exactly once`,
+      );
+      assert(
+        text.indexOf(mod.REPLY_ONLY) > text.indexOf(`</${tag}>`),
+        `${tag}: the instruction must come AFTER the closing tag`,
+      );
+      assert(
+        text.indexOf(mod.REPLY_ONLY) !== 0,
+        `${tag}: nothing may precede the payload`,
+      );
+    }
+    // The imperative must not name the tags or the body: it is the last thing the
+    // model reads, and a mention of the tags invites it to echo them.
+    assert(!/<context-|verbatim/i.test(mod.REPLY_ONLY), "instruction must stay tag-free and short");
+    assert(mod.REPLY_ONLY.split("\n").length === 1, "instruction must be one line");
+  });
+
+  check("T40 updatedAt: locale-independent HH:MM:SS", () => {
+    const iso = "2026-09-29T18:51:54.013Z";
+    const d = new Date(iso);
+    const pad = (n) => String(n).padStart(2, "0");
+    const expected = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+    const got = tuiData.updatedAt(iso);
+    assert(/^\d{2}:\d{2}:\d{2}$/.test(got), `expected HH:MM:SS, got ${got}`);
+    assert(got === expected, `local time mismatch: ${got} != ${expected}`);
+    // A fixed width regardless of the host locale (no AM/PM, no dotted form).
+    assert(tuiData.updatedAt("2026-09-29T05:06:07.000Z").length === 8, "6h7m7s must still be 8 chars");
+    assert(tuiData.updatedAt("") === "?" && tuiData.updatedAt("not-a-date") === "?");
+  });
+
+  check("T40 updatedCell: the stale marker survives the width", () => {
+    const iso = "2026-09-29T18:51:54.013Z";
+    const full = tuiData.updatedCell(iso, false, 10);
+    assert(full.length === 10, `fresh cell must fill 10 columns, got ${full.length}`);
+    assert(!full.includes("*"), `a fresh row must carry no marker: ${full}`);
+    const stale = tuiData.updatedCell(iso, true, 10);
+    assert(stale.length === 10, `a stale cell must stay inside the width, got ${stale.length}`);
+    assert(stale.endsWith(" *"), `the stale marker must survive: ${stale}`);
+    assert(/\d{2}:\d{2}:\d{2}/.test(stale), `the time must not be truncated at 10 columns: ${stale}`);
+    // Narrower column: the marker still wins over the time tail (fit() would
+    // otherwise cut exactly the marker off and leave a legend with no owner).
+    const narrow = tuiData.updatedCell(iso, true, 8);
+    assert(narrow.length === 8, `narrow cell must fill 8 columns, got ${narrow.length}`);
+    assert(narrow.endsWith(" *"), `narrow stale marker lost: ${narrow}`);
+  });
+
+  check("T40 contributorLine: unit + readable bucket label", () => {
+    const msg = contrib.contributorLine(
+      { kind: "asst.text", ref: "14:25", chars: 200, tokensEstimate: 50, tool: "", preview: "" },
+      1,
+    );
+    assert(msg.includes("assistant 14:25 message"), msg);
+    assert(msg.endsWith("50 tokens (est)"), `a bare number must carry its unit: ${msg}`);
+    const res = contrib.contributorLine(
+      { kind: "asst.result", ref: "14:26", chars: 5000, tokensEstimate: 1250, tool: "bash", preview: "" },
+      2,
+    );
+    assert(res.includes("tool result (bash)"), res);
+    assert(res.includes("1.3k tokens (est)"), `k-formatted value must carry its unit: ${res}`);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// T41 - a MODEL SWITCH inside one session must not keep reporting the previous
+// model's category split: cache reads are model-scoped and the persisted split
+// is only inherited while model + provider stay the same.
+// ---------------------------------------------------------------------------
+{
+  check("T41 breakdownForModel: cache reads are model-scoped", () => {
+    mod.breakdownCache.set("ses_T41", { userChars: 10, source: "context-hook", model: "model-alpha" });
+    assert(mod.breakdownForModel("ses_T41", "model-alpha") !== null, "same model must be served");
+    assert(mod.breakdownForModel("ses_T41", "model-beta") === null, "another model must not be served");
+    assert(mod.breakdownForModel("ses_T41", "unknown") !== null, "an unknown reader keeps the data");
+    mod.breakdownCache.set("ses_T41", { userChars: 10, source: "context-hook" });
+    assert(mod.breakdownForModel("ses_T41", "model-beta") !== null, "an untagged legacy entry is tolerated");
+    mod.breakdownCache.delete("ses_T41");
+    assert(mod.breakdownForModel("ses_T41", "model-alpha") === null, "a missing entry is null");
+  });
+
+  const t41Base = {
+    sessionID: "ses_T41W", parentID: null, role: "main", agent: null,
+    model: "model-alpha", providerID: "test-provider", ctx: 1000, input: 1000,
+    usable: 170000, limit: 200000, reasoning: 0,
+    categories: { user: 11, assistant: 12, reasoning: 0, toolArgs: 0, toolOut: 0, system: 13, toolSchemas: 14, other: 950 },
+    source: "context-hook", updatedAt: new Date().toISOString(),
+  };
+  const t41Bd = (model, over) => ({
+    userChars: 500, assistantChars: 40, reasoningChars: 0, toolArgsChars: 0,
+    toolOutChars: 0, toolOutByTool: {}, systemChars: 100, toolSchemasChars: 100,
+    reclaim: null, top: [], capturedAt: Date.now(), source: "context-hook", model,
+    ...over,
+  });
+  writeFileSync(HARNESS_STATE, JSON.stringify({ ses_T41W: t41Base }), "utf8");
+
+  check("T41 writeStateFile: another model's breakdown is not persisted", () => {
+    mod.breakdownCache.set(
+      "ses_T41W",
+      t41Bd("model-beta", { userChars: 9999, assistantChars: 9999, systemChars: null, toolSchemasChars: null }),
+    );
+    capture(() => mod.writeStateFile("ses_T41W", "model-alpha", "test-provider", 1000, 1000, 0));
+    const e = read().ses_T41W;
+    assert(e.categories.user === 11, `a model-beta split landed on model-alpha (user=${e.categories.user})`);
+    mod.breakdownCache.delete("ses_T41W");
+  });
+
+  check("T41 writeStateFile: an unknown provider is not a model switch", () => {
+    // A mirror/idle write may persist `providerID: ""` for the same model; the
+    // next write that knows the provider must keep the split, not zero it.
+    const cur = read();
+    cur.ses_T41P = { ...t41Base, sessionID: "ses_T41P", providerID: "" };
+    writeFileSync(HARNESS_STATE, JSON.stringify(cur), "utf8");
+    capture(() => mod.writeStateFile("ses_T41P", "model-alpha", "test-provider", 1000, 1000, 0));
+    const e = read().ses_T41P;
+    assert(e.providerID === "test-provider", `provider not learned: ${String(e.providerID)}`);
+    assert(e.categories.user === 11, `learning the provider zeroed the split (user=${e.categories.user})`);
+    assert(typeof e.usable === "number" && e.usable > 0, `learning the provider dropped the denominator (${String(e.usable)})`);
+  });
+
+  check("T41 writeStateFile: a switch uses the new model's split only", () => {
+    mod.breakdownCache.set("ses_T41W", t41Bd("model-gamma"));
+    capture(() => mod.writeStateFile("ses_T41W", "model-gamma", "test-provider", 2000, 2000, 0));
+    let e = read().ses_T41W;
+    assert(e.model === "model-gamma", `model not switched: ${e.model}`);
+    assert(e.categories.user === 500, `the new model's split must win, got user=${e.categories.user}`);
+    // No live breakdown for the NEXT switch: the old split must not be revived.
+    mod.breakdownCache.delete("ses_T41W");
+    capture(() => mod.writeStateFile("ses_T41W", "model-delta", "test-provider", 3000, 3000, 0));
+    e = read().ses_T41W;
+    assert(e.model === "model-delta", `model not switched: ${e.model}`);
+    assert(e.categories.user === 0, `a switch without a breakdown revived the old split (user=${e.categories.user})`);
+    assert(e.categories.system === null, `system must be unknown, not inherited (got ${e.categories.system})`);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// T42 - the panel row layout: growing the `updated` cell (so the stale marker
+// always fits) must not push the row past the panel width. The original defect
+// was exactly that: updW 8 -> 10 without taking the columns from anywhere, so
+// the host clipped the right edge and the marker disappeared again.
+// ---------------------------------------------------------------------------
+{
+  const tuiData = await import(
+    pathToFileURL(join(repoRoot, "lib", "tui-data.js")).href
+  );
+  check("T42 panelLayout: the row keeps the safe column at every width", () => {
+    // Sweep, not samples: the safe column used to vanish exactly where the
+    // model floor bound (w=60..62 were exact fits), which the sampled points
+    // 60/72/80/100/120 could not distinguish from "fine".
+    for (let w = 57; w <= 140; w++) {
+      const L = tuiData.panelLayout(w);
+      const total =
+        L.roleW + L.modelW + L.ctxW + L.costW + L.updW + 4 * L.gutter.length;
+      assert(
+        total <= w - 1,
+        `w=${w}: columns sum to ${total}, no safe column (panel is ${w})`,
+      );
+      assert(total >= w - 3, `w=${w}: layout wastes ${w - total} columns`);
+      assert(L.gutter.length === 2, `w=${w}: gutter must stay 2 columns`);
+      assert(L.modelW >= 8, `w=${w}: model cell below its 8-column floor`);
+      assert(L.roleW >= 12, `w=${w}: role cell below its 12-column floor`);
+      assert(L.updW === 10 || L.updW === 8, `w=${w}: unexpected updated width ${L.updW}`);
+    }
+    // Narrow panel: the updated cell gives up the stale marker's 2 columns
+    // instead of pushing the row off the panel.
+    assert(tuiData.panelLayout(60).updW === 8, "w=60 must use the 8-column time cell");
+    assert(tuiData.panelLayout(72).updW === 10, "w=72 must fit HH:MM:SS + ' *'");
+    // The role cell is what pays for the safe column once both floors bind.
+    assert(tuiData.panelLayout(60).roleW === 15, "w=60: role must give back 1 column");
+    // Undefined/zero width falls back to the 60-column default.
+    const fallback = tuiData.panelLayout(undefined);
+    assert(fallback.updW === 8 && fallback.modelW === 8, "default layout drifted");
+  });
+}
+
 if (failed) fatal(`${failed} unit test(s) failed`);
-pass(`all ${ranChecks} unit checks passed (T1-T12 + T13-T39)`);
+pass(`all ${ranChecks} unit checks passed (T1-T42)`);
 
 // ---------------------------------------------------------------------------
 // (e) corporate-identifier scan — no employer/vendor-specific names may appear
@@ -2972,6 +3167,8 @@ for (const dir of ["lib", "test", "gui"]) {
     if (ent.isFile()) scanFiles.push(`${dir}/${ent.name}`);
   }
 }
+// docs/ holds images only (gate (a) enforces it).
+
 const hits = [];
 for (const rel of scanFiles) {
   let text;
@@ -3074,10 +3271,237 @@ console.log("\n(g) Desktop GUI bundle...");
   if (/require\("(node:)?(fs|os|path|url|module|child_process|worker_threads)"\)/.test(bundle)) {
     fatal(`${bundleRel} requires a Node built-in - a window cannot resolve it`);
   }
+  // Build-output freshness: the bundle must be at least as new as every source
+  // file it inlines. CI rebuilds right before this gate, but a manual
+  // `node test/prepublish.mjs` without `npm run build:gui` would otherwise
+  // validate (and let a publisher ship) a stale artifact.
+  const bundleMtime = statSync(bundleAbs).mtimeMs;
+  for (const rel of [
+    "gui/index.tsx",
+    "gui/panel.tsx",
+    "lib/rpc.js",
+    "lib/format.js",
+  ]) {
+    const srcAbs = join(repoRoot, rel);
+    if (!existsSync(srcAbs)) fatal(`${rel} is missing - the GUI sources moved?`);
+    if (statSync(srcAbs).mtimeMs > bundleMtime) {
+      fatal(`${bundleRel} is older than ${rel} - run: npm run build:gui`);
+    }
+  }
   pass(
-    `bundle: ${bundleRel} (${(bundle.length / 1024).toFixed(1)} kB, CJS, app-provided externals kept)`,
+    `bundle: ${bundleRel} (${(bundle.length / 1024).toFixed(1)} kB, CJS, app-provided externals kept, newer than its sources)`,
   );
 }
+
+// ---------------------------------------------------------------------------
+// (h) Desktop GUI runtime smoke (./gui-experimental, built bundle)
+//
+// Gate (g) only inspects the bundle as TEXT. A regression can still be a
+// runtime one: a renamed host member (`ctx.add` -> `ctx.register`), a missing
+// export, a wrong entry shape, or a pill that never renders. This gate LOADS the
+// shipped artifact with synthetic host modules (the window provides them for
+// real) and runs setup() against a fake context, exactly like the app's first
+// window would.
+//
+// The stubs stand in for code the window injects: solid-js / solid-js/web (the
+// renderer's reactive core), @opencode/plugin/gui (the contribution kinds and
+// Plugin.define) and @opencode/plugin/rpc (Rpc.define). Everything else in the
+// bundle is the real shipped code.
+// ---------------------------------------------------------------------------
+console.log("\n(h) Desktop GUI runtime smoke...");
+{
+  const bundleAbs = join(repoRoot, "dist/gui-experimental.cjs");
+  if (!existsSync(bundleAbs)) {
+    fatal("dist/gui-experimental.cjs is missing - run: npm run build:gui");
+  }
+  const { default: Module } = await import("node:module");
+
+  // --- synthetic host modules ---------------------------------------------
+  const cleanups = [];
+  const timers = [];
+  const cleared = [];
+  const solidWeb = {
+    template: () => () => ({ nodeType: 1 }),
+    insert: () => {},
+    render: () => () => {},
+    spread: (props) => props,
+    createComponent: (fn) => (fn ? fn() : null),
+  };
+  const solid = {
+    createSignal: (initial) => {
+      let value = initial;
+      return [() => value, (next) => { value = typeof next === "function" ? next(value) : next; }];
+    },
+    createEffect: (fn) => { try { fn(); } catch { /* no owner in the stub */ } },
+    createMemo: (fn) => fn(),
+    onMount: () => {},
+    onCleanup: (fn) => cleanups.push(fn),
+    Show: () => null,
+    For: () => null,
+    Index: () => null,
+    children: (v) => (typeof v === "function" ? v : () => v),
+  };
+  // Marker objects: the real host matches these identities; the smoke test only
+  // needs distinct, stable values to assert what setup() registered.
+  const guiKinds = {
+    Panel: { kind: "Panel" },
+    MenuItem: { kind: "MenuItem" },
+    Command: { kind: "Command" },
+    ComposerPill: { kind: "ComposerPill" },
+    usePlugin: () => ({ client: null }),
+    Plugin: { define: (spec) => spec },
+  };
+  let rpcDef = null;
+  const rpc = {
+    Rpc: {
+      define: (def) => { rpcDef = def; return def; },
+      call: async () => undefined,
+    },
+  };
+  const stubs = new Map([
+    ["solid-js", solid],
+    ["solid-js/web", solidWeb],
+    ["@opencode/plugin/gui", guiKinds],
+    ["@opencode/plugin/rpc", rpc],
+  ]);
+
+  const realSetInterval = globalThis.setInterval;
+  const realClearInterval = globalThis.clearInterval;
+  globalThis.setInterval = (fn, ms) => {
+    const handle = { fake: true, ms };
+    timers.push(handle);
+    return handle; // never actually fires: the smoke test drives refreshPill
+  };
+  globalThis.clearInterval = (handle) => { cleared.push(handle); };
+
+  const restoreGlobals = () => {
+    globalThis.setInterval = realSetInterval;
+    globalThis.clearInterval = realClearInterval;
+  };
+  // Every exit path restores the real timer API - including fatal() below, which
+  // ends the process. Module._load is restored by the finally around require().
+  process.once("exit", restoreGlobals);
+
+  const realLoad = Module._load;
+  Module._load = function (request, parent, isMain) {
+    if (stubs.has(request)) return stubs.get(request);
+    return realLoad.call(this, request, parent, isMain);
+  };
+  let gui;
+  try {
+    gui = createRequire(import.meta.url)(bundleAbs);
+  } finally {
+    Module._load = realLoad;
+  }
+
+  const fail = (msg) => fatal(`(h) ${msg}`);
+
+  const plugin = gui?.default;
+  if (!plugin || typeof plugin.setup !== "function") {
+    fail("bundle default export has no setup() - Plugin.define shape changed");
+  }
+
+  // --- fake host context --------------------------------------------------
+  const adds = [];
+  const opens = [];
+  const fakeRows = [
+    {
+      sessionID: "ses_smoke", parentID: "", agent: "build", modelID: "model-alpha",
+      providerID: "test-provider", ctx: 70, input: 70, usable: 100, reserve: 30,
+      user: 1, assistant: 1, reasoning: 0, toolArgs: 0, toolOut: 0,
+      system: 1, toolSchemas: 1, other: 66, source: "context-hook",
+      updatedAt: "2026-01-01T00:00:00.000Z", stale: false,
+    },
+  ];
+  const ctx = {
+    id: "window-smoke",
+    add: (kind, factory) => adds.push({ kind, factory }),
+    layout: { open: (key, ref, opts) => opens.push({ key, ref, opts }) },
+    sessions: { current: () => ({ id: "ses_smoke" }) },
+    client: { rpc: (def) => ({ family: async () => ({ rows: fakeRows, def }) }) },
+  };
+
+  try {
+    plugin.setup(ctx);
+  } catch (err) {
+    fail(`setup() threw: ${err && err.message ? err.message : err}`);
+  }
+
+  // --- registration assertions -------------------------------------------
+  const kinds = adds.map((a) => a.kind && a.kind.kind);
+  if (kinds.join(",") !== "Panel,MenuItem,Command,ComposerPill") {
+    fail(`setup() registered [${kinds.join(", ")}] - expected Panel, MenuItem, Command, ComposerPill`);
+  }
+  const entryOf = (kind) => adds.find((a) => a.kind && a.kind.kind === kind);
+
+  const panelEntry = entryOf("Panel").factory();
+  if (panelEntry.id !== "context" || panelEntry.region !== "side" || panelEntry.wide !== true) {
+    fail(`panel entry shape changed: ${JSON.stringify({ id: panelEntry.id, region: panelEntry.region, wide: panelEntry.wide })}`);
+  }
+  if (typeof panelEntry.render !== "function" || typeof panelEntry.list !== "function") {
+    fail("panel entry lost render()/list()");
+  }
+  if (!Array.isArray(panelEntry.list({ open: [] })) || panelEntry.list({ open: [] }).length !== 0) {
+    fail("panel list() must return no tab while the host has not opened it");
+  }
+  const listed = panelEntry.list({ open: ["context"] });
+  if (!Array.isArray(listed) || listed.length !== 1 || listed[0].id !== "context") {
+    fail("panel list() must return the Context tab once the host stores its key");
+  }
+  if (panelEntry.mobile?.kind !== "tab") {
+    fail("panel entry lost its narrow-window (mobile) view");
+  }
+
+  const menuEntry = entryOf("MenuItem").factory();
+  if (menuEntry.menu !== "session.panel" || menuEntry.id !== "context" || typeof menuEntry.run !== "function") {
+    fail(`+ menu entry shape changed: ${JSON.stringify({ menu: menuEntry.menu, id: menuEntry.id })}`);
+  }
+  const cmdEntry = entryOf("Command").factory();
+  if (cmdEntry.slash?.name !== "cx" || typeof cmdEntry.run !== "function") {
+    fail(`command entry shape changed: ${JSON.stringify({ slash: cmdEntry.slash, id: cmdEntry.id })}`);
+  }
+
+  // The RPC contract the window talks to must still be defined with the family
+  // method; the server side (gate d / T30) owns the row schema itself.
+  if (!rpcDef || rpcDef.id !== "context-indicator" || !rpcDef.methods?.family) {
+    fail("DesktopContextRpc definition missing from the bundle");
+  }
+
+  // --- pill behaviour -----------------------------------------------------
+  const pillEntry = entryOf("ComposerPill").factory();
+  if (typeof pillEntry.show !== "function" || pillEntry.id !== "usage") {
+    fail("composer pill entry shape changed");
+  }
+  if (timers.length !== 1 || timers[0].ms !== 5000) {
+    fail(`pill poll must schedule exactly one 5000 ms timer, got ${JSON.stringify(timers.map((t) => t.ms))}`);
+  }
+  // refreshPill() was started by setup(): let its promise chain settle.
+  await new Promise((resolve) => setImmediate(resolve));
+  const pill = pillEntry.show({ session: { id: "ses_smoke" } });
+  if (!pill || pill.label !== "70% ctx") {
+    fail(`pill label for 70/100 not "70% ctx": ${JSON.stringify(pill && pill.label)}`);
+  }
+  if (pill.tone !== "warning") {
+    fail(`70% must be the warning tone, got ${String(pill.tone)}`);
+  }
+  if (pillEntry.show({ session: { id: "ses_other" } }) !== undefined) {
+    fail("pill must not describe a session it did not measure");
+  }
+  // run() of the + menu item opens the stored layout key.
+  menuEntry.run();
+  if (opens.length !== 1 || opens[0].key !== "window-smoke:context" || opens[0].opts?.tab !== "select") {
+    fail(`panel open() called layout.open wrongly: ${JSON.stringify(opens)}`);
+  }
+  // onCleanup must stop the poll (the host disposes the window).
+  cleanups.forEach((fn) => fn());
+  if (cleared.length !== 1 || cleared[0] !== timers[0]) {
+    fail("onCleanup did not clear the pill poll timer");
+  }
+
+  restoreGlobals();
+  pass("bundle loads, setup() registers panel/menu/command/pill, pill renders (70% ctx, warning)");
+}
+
 
 
 // Cleanup the isolated harness files only — never the live state.json/log.

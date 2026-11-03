@@ -33,11 +33,17 @@ const CATEGORIES = [
   ["other", "Other"],
 ] as const
 
+// Deterministic HH:MM:SS in LOCAL time, built from the Date getters instead of
+// toLocaleTimeString(): the latter follows the host locale (AM/PM, dotted
+// separators, seconds dropped) and made the pill/panel text differ from the TUI
+// sidebar on the same machine.
 function timeOnly(iso: string): string {
   if (!iso) return "?"
   try {
     const d = new Date(iso)
-    return Number.isNaN(d.getTime()) ? "?" : d.toLocaleTimeString()
+    if (Number.isNaN(d.getTime())) return "?"
+    const pad = (n: number) => String(n).padStart(2, "0")
+    return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
   } catch {
     return "?"
   }

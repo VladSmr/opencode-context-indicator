@@ -73,6 +73,19 @@ export declare function fmt(n: number): string
 export declare function num(v: unknown): number
 export declare function fit(s: string, w: number): string
 export declare function updatedAt(iso: string | undefined): string
+export declare function updatedCell(
+  iso: string | undefined,
+  stale: boolean | undefined,
+  width: number,
+): string
+export declare function panelLayout(panelWidth: number | undefined): {
+  roleW: number
+  modelW: number
+  ctxW: number
+  costW: number
+  updW: number
+  gutter: string
+}
 export declare function toolOutEntries(
   map: Record<string, number> | undefined,
   limit?: number,
