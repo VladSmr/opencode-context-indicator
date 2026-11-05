@@ -1,0 +1,12 @@
+# Line endings: the repo is authored on Windows and verified on Linux. Store
+# every text file with LF so a checkout on either side produces the same bytes
+# (a CRLF<->LF diff noise in a release commit is unreviewable), and keep binary
+# assets untouched.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary

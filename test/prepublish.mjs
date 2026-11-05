@@ -7,7 +7,7 @@
  *       the opencode TUI loader bridges (keeps npm installs live, #33884)
  *   (c) resolve chain - host-bridged modules resolve, local imports exist, and
  *       none of them is a production dependency (no duplicate instance)
- *   (d) unit-harness T1-T41 for the limit/agent/state/command/Desktop-RPC fixes
+ *   (d) unit-harness T1-T43 for the limit/agent/state/command/Desktop-RPC fixes
  *   (e) corporate-identifier scan (lib/, gui/, test/ and the published surface)
  *   (f) non-English scan - no non-ASCII letters (any language other than
  *       English) anywhere in the published surface or the test tree
@@ -3137,8 +3137,115 @@ check("T32 client-context fallback never shadows hook-measured categories", () =
   });
 }
 
+// ---------------------------------------------------------------------------
+// T43 - `session.deleted` purges the persisted entry (and its subtree). Waiting
+// for the 7-day tombstone left dead sessions in the breakdown table, the Desktop
+// tab and the /cx picker, and a phantom row has no step left to be filtered by.
+// ---------------------------------------------------------------------------
+{
+  const readRaw = () => JSON.parse(readFileSync(HARNESS_STATE, "utf8"));
+
+  check("T43 pruneSessionState: a deleted session takes its subtree, not its peers", () => {
+    writeFileSync(
+      HARNESS_STATE,
+      JSON.stringify({
+        ses_T43root: { sessionID: "ses_T43root", parentID: null, ctx: 10 },
+        ses_T43a: { sessionID: "ses_T43a", parentID: "ses_T43root", ctx: 20 },
+        ses_T43b: { sessionID: "ses_T43b", parentID: "ses_T43a", ctx: 30 },
+        ses_T43peer: { sessionID: "ses_T43peer", parentID: null, ctx: 40 },
+      }),
+      "utf8",
+    );
+    assert(mod.pruneSessionState("ses_T43root") === true, "prune must report a write");
+    const after = readRaw();
+    assert(
+      !("ses_T43root" in after) && !("ses_T43a" in after) && !("ses_T43b" in after),
+      `subtree survived: ${Object.keys(after).join(",")}`,
+    );
+    assert(after.ses_T43peer?.ctx === 40, "an unrelated session must survive");
+  });
+
+  check("T43 pruneSessionState: unknown and unsafe keys change nothing", () => {
+    const before = readFileSync(HARNESS_STATE, "utf8");
+    assert(mod.pruneSessionState("ses_T43missing") === false, "a missing session must report no write");
+    assert(mod.pruneSessionState("__proto__") === false, "an unsafe key must be rejected");
+    assert(readFileSync(HARNESS_STATE, "utf8") === before, "state.json must be untouched");
+  });
+
+  check("T43 a deleted child cannot be recreated by a late write", () => {
+    // The deleted session's own idle/step may still arrive (or a child may still
+    // be running): without the write barrier the row came back - as a ROOT, since
+    // the parent cache was cleared too.
+    const iso = new Date().toISOString();
+    writeFileSync(
+      HARNESS_STATE,
+      JSON.stringify({
+        ses_T43x: { sessionID: "ses_T43x", parentID: null, ctx: 10, updatedAt: iso },
+        ses_T43y: { sessionID: "ses_T43y", parentID: "ses_T43x", ctx: 20, updatedAt: iso },
+      }),
+      "utf8",
+    );
+    assert(mod.pruneSessionState("ses_T43x") === true, "prune must report a write");
+    assert(
+      mod.writeStateFile("ses_T43y", "model-alpha", "test-provider", 500, 500, 0) === false,
+      "a write for a pruned child must be dropped",
+    );
+    assert(!("ses_T43y" in readRaw()), "the pruned child was recreated");
+  });
+
+  check("T43 an in-memory child of a deleted session is blocked too", () => {
+    // A child that has no persisted entry yet is invisible to the disk walk; the
+    // in-memory parent cache is the only place it exists before its first write.
+    mod.sessionParentCache.set("ses_T43m", "ses_T43p");
+    assert(mod.pruneSessionState("ses_T43p") === false, "nothing persisted -> no write");
+    assert(
+      mod.writeStateFile("ses_T43m", "model-alpha", "test-provider", 700, 700, 0) === false,
+      "an unpersisted child of a deleted session must not land as a root",
+    );
+    assert(!("ses_T43m" in readRaw()), "the unpersisted child was written anyway");
+    mod.sessionParentCache.delete("ses_T43m");
+  });
+
+  check("T43 a busy lock queues the whole subtree for the next write", () => {
+    // The lock file is what makes `pruneSessionState` defer: it cannot read the
+    // snapshot, so it must queue the ROOT (the subtree is resolved later under
+    // the next write's lock), not a flat id it cannot compute.
+    const iso = new Date().toISOString();
+    writeFileSync(
+      HARNESS_STATE,
+      JSON.stringify({
+        ses_T43q: { sessionID: "ses_T43q", parentID: null, ctx: 10, updatedAt: iso },
+        ses_T43qc: { sessionID: "ses_T43qc", parentID: "ses_T43q", ctx: 20, updatedAt: iso },
+        ses_T43keeper: { sessionID: "ses_T43keeper", parentID: null, ctx: 30, updatedAt: iso },
+      }),
+      "utf8",
+    );
+    const lockFile = `${HARNESS_STATE}.lock`;
+    writeFileSync(lockFile, "busy", "utf8");
+    try {
+      assert(mod.pruneSessionState("ses_T43q") === false, "a busy lock must defer the delete");
+      assert("ses_T43q" in readRaw(), "nothing may be deleted without the lock");
+    } finally {
+      unlinkSync(lockFile);
+    }
+    // Any later write replays the queued root and its subtree, under its lock.
+    assert(
+      mod.writeStateFile("ses_T43keeper", "model-alpha", "test-provider", 900, 900, 0) === true,
+      "the replaying write must succeed",
+    );
+    const after = readRaw();
+    assert(!("ses_T43q" in after) && !("ses_T43qc" in after), `queued subtree survived: ${Object.keys(after)}`);
+    assert(after.ses_T43keeper?.ctx === 900, "the unrelated session must be written");
+    // The replay also armed the barrier for the queued subtree.
+    assert(
+      mod.writeStateFile("ses_T43qc", "model-alpha", "test-provider", 1000, 1000, 0) === false,
+      "a replayed child must be behind the barrier",
+    );
+  });
+}
+
 if (failed) fatal(`${failed} unit test(s) failed`);
-pass(`all ${ranChecks} unit checks passed (T1-T42)`);
+pass(`all ${ranChecks} unit checks passed (T1-T43)`);
 
 // ---------------------------------------------------------------------------
 // (e) corporate-identifier scan — no employer/vendor-specific names may appear

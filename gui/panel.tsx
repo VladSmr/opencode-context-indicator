@@ -194,7 +194,14 @@ export function ContextPanel(props: { session: MountedSession }) {
   })
 
   const root = () => rows()[0]
-  const children = () => rows().slice(1)
+  // Heaviest child first: a family can hold a dozen subagents and the RPC order
+  // is the parentID walk order, which buries the session that is actually eating
+  // the window. `slice()` first - `rows()` is the polled snapshot and the RPC
+  // array must not be reordered in place.
+  const children = () =>
+    rows()
+      .slice(1)
+      .sort((a, b) => (b.ctx || 0) - (a.ctx || 0))
 
   const barWidth = (tokens: number) => {
     const total = root()?.ctx || 0

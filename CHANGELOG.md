@@ -4,6 +4,33 @@ Notable user-facing changes per release. Dates are commit days (UTC).
 The package also ships a dual V1/V2 plugin — see the README for the surface
 matrix; everything below concerns the V2 path unless stated otherwise.
 
+## 1.8.3 — 2026-11-03
+
+- **A deleted session disappears immediately.** `session.deleted` now removes the
+  session's `state.json` entry - and every entry under it in the `parentID` chain -
+  instead of leaving it to the 7-day tombstone. The row used to stay in
+  `/context-breakdown`, the Desktop tab and the `/cx` picker for up to a week, and
+  a phantom row has no step event left for the phantom filter to catch. Removed
+  IDs are remembered for the lifetime of the instance (the host never reuses an
+  ID), so a late write cannot recreate the row: without that barrier a child that
+  was still running when its parent was deleted came back as a phantom ROOT,
+  because deleting the parent had already wiped its attribution cache. The same
+  barrier covers a child that has no persisted entry yet. A state lock that is
+  busy at delete time queues the removal for the next write instead of dropping
+  it. The write path follows the same lock/atomic-rename contract as the state
+  writer; a missing entry is a no-op and an unsafe key is rejected.
+- **The Desktop subagent list is heaviest-first.** A family can hold a dozen
+  children and the RPC order is the `parentID` walk, which buried the session
+  actually eating the window; the list is now sorted by `ctx` (the polled array is
+  copied first, never reordered in place).
+- **`.gitattributes` normalises line endings.** Text files are stored with LF and
+  the image assets are marked binary, so a checkout on Windows and on the Linux CI
+  produces the same bytes instead of a CRLF/LF diff on every edit.
+- Unit harness extended to T43 (deleted-session purge: subtree removal, unrelated
+  entries kept, missing/unsafe keys are no-ops, late writes for a pruned or
+  not-yet-persisted child are dropped, a busy lock queues the whole subtree for
+  the next write), 116 checks in total.
+
 ## 1.8.2 — 2026-11-03
 
 - **Model-rendered commands no longer echo the instruction.** `/context`,

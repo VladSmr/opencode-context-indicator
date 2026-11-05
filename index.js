@@ -184,6 +184,7 @@ import { breakdownCache, breakdownForModel, lastKnownCacheRead, lastKnownCacheWr
 import { registerDesktopRpc, toDesktopRow } from "./lib/desktop.js";
 import {
   logErr,
+  pruneSessionState,
   readStateSnapshot,
   writeStateFile,
 } from "./lib/state.js";
@@ -201,6 +202,7 @@ export {
   sessionAgentCache,
   sessionParentCache,
   writeStateFile,
+  pruneSessionState,
   hydrateModelLimitsFromState,
   getUsableContext,
   getModelLimit,
