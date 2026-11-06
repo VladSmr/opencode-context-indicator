@@ -65,3 +65,13 @@ jobs:
       # catalog). Run `node test/drift-watch.mjs --strict` before a release to
       # fail on ANY drift.
       - run: node test/drift-watch.mjs
+
+      # Runtime-only vulnerability audit. The package ships NO dependencies (only
+      # optional peers resolved by the host), so `--omit=dev` must stay at zero
+      # findings: every advisory in the tree belongs to the dev toolchain
+      # (@opencode/plugin is used for types and drags npm-CLI internals, plus
+      # glob/minimatch with no upstream fix). Two of those cannot be fixed
+      # without dropping the typecheck dependency, so the dev tree is accepted as
+      # is and only a REAL runtime finding is allowed to fail the build. Kept
+      # last so the offline gates report before a registry hiccup can.
+      - run: npm audit --omit=dev --audit-level=moderate

@@ -1,6 +1,6 @@
 {
   "name": "opencode-context-indicator",
-  "version": "1.8.3",
+  "version": "1.8.4",
   "description": "Real-time context-window usage for OpenCode: per-category token breakdown, /context-diff, a zero-LLM /cx panel with per-session cost and a searchable family-session picker, a TUI sidebar, and an experimental Desktop panel. Dual V1 + V2 plugin entry.",
   "type": "module",
   "license": "MIT",
@@ -86,6 +86,7 @@
     "test:e2e:quick": "node test/e2e-tui.mjs --quick",
     "test:drift": "node test/drift-watch.mjs",
     "test:drift:strict": "node test/drift-watch.mjs --strict",
+    "test:audit": "npm audit --omit=dev --audit-level=moderate",
     "prepublishOnly": "npm run build:gui && node test/prepublish.mjs && node test/e2e-tui.mjs --full"
   }
 }

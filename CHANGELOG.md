@@ -4,6 +4,17 @@ Notable user-facing changes per release. Dates are commit days (UTC).
 The package also ships a dual V1/V2 plugin — see the README for the surface
 matrix; everything below concerns the V2 path unless stated otherwise.
 
+## 1.8.4 — 2026-11-06
+
+- CI gained a runtime-only dependency audit (`npm audit --omit=dev`, also
+  `npm run test:audit`): the package ships no dependencies, so that number must
+  stay at zero. The dev tree keeps 26 moderate advisories inside npm's own CLI
+  packages pulled by `@opencode/plugin` (types only) plus `glob`/`minimatch` with
+  no upstream fix; two of them are not fixable without dropping the typecheck
+  dependency, and none of them can reach a user. The README documents the
+  expected `WARN EBADENGINE` from `@opentui/core` (`node >= 26.4.0`) in a
+  checkout.
+
 ## 1.8.3 — 2026-11-03
 
 - **A deleted session disappears immediately.** `session.deleted` now removes the
