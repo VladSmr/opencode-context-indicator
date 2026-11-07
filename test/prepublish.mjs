@@ -7,7 +7,7 @@
  *       the opencode TUI loader bridges (keeps npm installs live, #33884)
  *   (c) resolve chain - host-bridged modules resolve, local imports exist, and
  *       none of them is a production dependency (no duplicate instance)
- *   (d) unit-harness T1-T43 for the limit/agent/state/command/Desktop-RPC fixes
+ *   (d) unit-harness T1-T44 for the limit/agent/state/command/Desktop-RPC fixes
  *   (e) corporate-identifier scan (lib/, gui/, test/ and the published surface)
  *   (f) non-English scan - no non-ASCII letters (any language other than
  *       English) anywhere in the published surface or the test tree
@@ -3244,8 +3244,29 @@ check("T32 client-context fallback never shadows hook-measured categories", () =
   });
 }
 
+// T44 - the auto-compaction ceiling mirrors the RELEASED core, not PR text or a
+// branch head: reserve = max(floor(window * 0.15), window >= 2 * 16_000 ? 16_000
+// : 0). The 200k case is the discriminator: the unreleased `v2` branch (and the
+// PR #51271 description) would give 20_000 there, i.e. a compact-at point 10k
+// above what the shipped host acts on. Offline, so the daily drift-watch is not
+// the only guard.
+{
+  check("T44 compaction ceiling matches released core (15% / 16k / 2x gate)", () => {
+    assert(mod.reserveFor(200000) === 30000, `200k window: ${mod.reserveFor(200000)} != 30000`);
+    assert(mod.reserveFor(100000) === 16000, `100k window: ${mod.reserveFor(100000)} != 16000`);
+    // Exactly at the gate: floor(32000 * 0.15) = 4800, the floor lifts it to 16k.
+    assert(mod.reserveFor(32000) === 16000, `32k window: ${mod.reserveFor(32000)} != 16000`);
+    // One token below the gate: the share only (floor(31999 * 0.15) = 4799).
+    assert(mod.reserveFor(31999) === 4799, `31999 window: ${mod.reserveFor(31999)} != 4799`);
+    // A buffer replaces the whole reserve only while it leaves room.
+    assert(mod.reserveFor(200000, 50000) === 50000, "an override must replace the share");
+    assert(mod.reserveFor(200000, 200000) === 30000, "a buffer >= window must be ignored");
+    assert(mod.reserveFor(0) === null, "a non-positive window must be unmeasurable");
+  });
+}
+
 if (failed) fatal(`${failed} unit test(s) failed`);
-pass(`all ${ranChecks} unit checks passed (T1-T43)`);
+pass(`all ${ranChecks} unit checks passed (T1-T44)`);
 
 // ---------------------------------------------------------------------------
 // (e) corporate-identifier scan — no employer/vendor-specific names may appear

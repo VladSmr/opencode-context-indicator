@@ -4,6 +4,27 @@ Notable user-facing changes per release. Dates are commit days (UTC).
 The package also ships a dual V1/V2 plugin — see the README for the surface
 matrix; everything below concerns the V2 path unless stated otherwise.
 
+## 1.8.5 — 2026-11-07
+
+- **The compaction ceiling is verified against the released core and guarded
+  automatically.** No runtime change: the plugin already computes `window =
+  min(input, context)` and `reserve = max(floor(window * 0.15), window >=
+  2 * 16_000 ? 16_000 : 0)`, exactly `calculateCeiling()` in opencode 2.2.5.
+  Merged PR #51271 describes a 10% reserve in its body, but only its reply cap
+  shipped (`OUTPUT_TOKEN_MAX = 256_000` in `session/model-request.ts`); the
+  trigger stayed at 15%, and the unreleased `v2` branch (10%, and no
+  `min(input, context)` cap) is deliberately not mirrored - following a branch
+  head would make every displayed percentage wrong.
+- `test/drift-watch.mjs` now fetches the release tag's
+  `packages/core/src/session/compaction.ts` and `model-request.ts`, prints the
+  parsed contract (`reserve=max(15%, 16000) window=min(input, context)
+  outputMax=256000`) and FAILS in every mode when the share, the minimum, the
+  `2 * RESERVE_MIN` gate or the `inputWindow()` shape changes. A changed reply
+  cap is advisory (it sizes the reply, not the trigger) and fails only under
+  `--strict`.
+- T44 pins the released formula offline, including the exact `2 * 16_000`
+  boundary and the buffer-override rules; the harness is now 117 checks.
+
 ## 1.8.4 — 2026-11-06
 
 - CI gained a runtime-only dependency audit (`npm audit --omit=dev`, also

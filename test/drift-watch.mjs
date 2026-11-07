@@ -28,6 +28,14 @@
  *     check. Use it before a release:
  *         node test/drift-watch.mjs --strict
  *
+ * The same pass also reads the released core's `session/compaction.ts` and
+ * `session/model-request.ts` and compares the constants this plugin mirrors:
+ * the auto-compaction reserve (`RESERVE_SHARE`, `RESERVE_MIN`, the
+ * `2 * RESERVE_MIN` gate), the `inputWindow()` min(input, context) cap and the
+ * `OUTPUT_TOKEN_MAX` reply cap. A changed formula FAILS in every mode (it makes
+ * every displayed percentage wrong); a changed reply cap is advisory because the
+ * plugin does not model the fitted output budget.
+ *
  * In GitHub Actions a warning is also emitted as a `::warning::` annotation so
  * it shows up in the run summary without failing the build.
  */
@@ -35,6 +43,7 @@
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { RESERVE_MIN, RESERVE_SHARE } from "../lib/constants.js";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const pkg = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8"));
@@ -96,6 +105,28 @@ async function fetchJson(url) {
       if (res.ok) return await res.json();
       lastErr = new Error(`HTTP ${res.status} for ${url}`);
       if (res.status !== 404 && res.status < 500) break; // deterministic failure
+    } catch (err) {
+      lastErr = err;
+    }
+    if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 5000));
+  }
+  throw lastErr;
+}
+
+// Plain-text sibling of fetchJson for the core source files whose constants we
+// mirror (the compaction ceiling is not exposed through any API the plugin can
+// query at runtime, so the release tag's source is the only source of truth).
+async function fetchText(url) {
+  let lastErr;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const res = await fetch(url, {
+        headers: { accept: "text/plain" },
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (res.ok) return await res.text();
+      lastErr = new Error(`HTTP ${res.status} for ${url}`);
+      if (res.status !== 404 && res.status < 500) break;
     } catch (err) {
       lastErr = err;
     }
@@ -185,12 +216,28 @@ async function readHost() {
     );
   }
 
+  // Core source files this plugin mirrors numerically. The plugin API exposes
+  // the assembled payload but not the compaction trigger, so a released formula
+  // change is invisible at runtime - and a wrong reserve silently makes every
+  // displayed percentage wrong. Fetched separately in run() so a 404 here can
+  // never hide a version-pin drift.
   return {
     hostVersion,
     tag,
     solid: catalog["@opentui/solid"],
     core: catalog["@opentui/core"],
     hostPlugin,
+  };
+}
+
+async function readCompactionContract(tag) {
+  return {
+    compactionSource: await fetchText(
+      `https://raw.githubusercontent.com/anomalyco/opencode/${tag}/packages/core/src/session/compaction.ts`,
+    ),
+    modelRequestSource: await fetchText(
+      `https://raw.githubusercontent.com/anomalyco/opencode/${tag}/packages/core/src/session/model-request.ts`,
+    ),
   };
 }
 
@@ -234,10 +281,151 @@ async function run() {
     { minorIsBreaking: true },
   );
 
-  if (drifts.length === 0) {
-    console.log(
-      "[drift-watch OK] OpenTUI pin + @opencode/plugin types aligned with the released host.",
+  // Compaction contract: the numbers lib/constants.js mirrors from the released
+  // core. Version drift is a warning; a changed FORMULA is breaking, because the
+  // plugin keeps showing the old ceiling (and a percentage the host never acts
+  // on). Fetched separately from the pins, and a network miss only skips this
+  // section - it must never hide a pin drift.
+  let contractSrc = null;
+  try {
+    contractSrc = await readCompactionContract(host.tag);
+  } catch (err) {
+    const msg =
+      `cannot read the compaction ceiling from ${host.tag} (release in flight?): ` +
+      `${err?.message ?? err}`;
+    if (strict) fail(`${msg} (strict mode: alignment cannot be verified)`);
+    warn(`${msg} (inconclusive - compaction contract skipped; version pins still reported)`);
+  }
+
+  let contractChecked = false;
+  if (contractSrc) {
+    contractChecked = true;
+    const squash = (s) => s.replace(/\s+/g, " ");
+    // Slice exactly ONE function body. A braced arrow always runs to the first
+    // column-0 `\n}` (a blank line inside the body is normal formatting, not the
+    // end); a single-expression arrow ends at the blank line before the next
+    // declaration. No fixed character windows and no premature cut on internal
+    // blank lines.
+    const functionSource = (src, name) => {
+      const at = src.indexOf(`const ${name}`);
+      if (at < 0) return "";
+      const arrow = src.indexOf("=>", at);
+      if (arrow < 0) return "";
+      let cursor = arrow + 2;
+      while (cursor < src.length && /\s/.test(src[cursor])) cursor++;
+      if (src[cursor] === "{") {
+        const end = src.indexOf("\n}", cursor);
+        return end < 0 ? src.slice(at) : src.slice(at, end + 2);
+      }
+      const end = src.indexOf("\n\n", arrow);
+      return end < 0 ? src.slice(at) : src.slice(at, end);
+    };
+    const numConst = (src, name, where) => {
+      const m = new RegExp(`const ${name} = ([0-9_.]+)`).exec(src);
+      if (!m) {
+        fail(
+          `${where} no longer declares ${name} - the compaction formula changed; ` +
+            "re-audit lib/constants.js and lib/limits.js against the new source",
+        );
+      }
+      return Number(m[1].replace(/_/g, ""));
+    };
+    // The reply cap is NOT modelled by the plugin, so a missing/renamed constant
+    // is an advisory signal, never a hard failure.
+    const optionalNum = (src, name) => {
+      const m = new RegExp(`const ${name} = ([0-9_.]+)`).exec(src);
+      return m ? Number(m[1].replace(/_/g, "")) : null;
+    };
+
+    const hostShare = numConst(
+      contractSrc.compactionSource,
+      "RESERVE_SHARE",
+      `${host.tag} compaction.ts`,
     );
+    const hostMin = numConst(
+      contractSrc.compactionSource,
+      "RESERVE_MIN",
+      `${host.tag} compaction.ts`,
+    );
+    const hostOutputMax = optionalNum(contractSrc.modelRequestSource, "OUTPUT_TOKEN_MAX");
+
+    const ceilingBody = functionSource(contractSrc.compactionSource, "calculateCeiling");
+    const inputWindowBody = functionSource(contractSrc.compactionSource, "inputWindow");
+    const ceilingOpen = ceilingBody.length > 0;
+    const inputWindowOpen = inputWindowBody.length > 0;
+    const ceilingFlat = squash(ceilingBody);
+    const inputWindowFlat = squash(inputWindowBody);
+    const hasShare =
+      /Math\.floor\(window \* RESERVE_SHARE\)|Math\.floor\(RESERVE_SHARE \* window\)/.test(
+        ceilingFlat,
+      ) && /Math\.max\(/.test(ceilingFlat);
+    const hasMinGate = /window >= 2 \* RESERVE_MIN \? RESERVE_MIN : 0/.test(ceilingFlat);
+    const hasInputMin =
+      /Math\.min\(limit\.input, limit\.context\)|Math\.min\(limit\.context, limit\.input\)/.test(
+        inputWindowFlat,
+      );
+
+    console.log(
+      `compaction: reserve=max(${hostShare * 100}%, ${hostMin})  ` +
+        `window=${hasInputMin ? "min(input, context)" : "NOT min(input, context)"}  ` +
+        `outputMax=${hostOutputMax ?? "unknown"}`,
+    );
+
+    const contract = (name, oursValue, hostValue, breaking) =>
+      drifts.push({
+        name,
+        ours: String(oursValue),
+        host: String(hostValue),
+        breaking,
+      });
+    if (!ceilingOpen) {
+      fail(
+        `${host.tag} compaction.ts lost calculateCeiling() - re-audit lib/constants.js and lib/limits.js`,
+      );
+    }
+    if (!inputWindowOpen) {
+      fail(
+        `${host.tag} compaction.ts lost inputWindow() - re-audit lib/constants.js and lib/limits.js`,
+      );
+    }
+    if (!hasShare) {
+      contract("core compaction RESERVE_SHARE usage", `${RESERVE_SHARE}`, "formula changed", true);
+    }
+    if (!hasMinGate) {
+      contract("core compaction 2 * RESERVE_MIN gate", `${RESERVE_MIN}`, "formula changed", true);
+    }
+    if (!hasInputMin) {
+      contract("core inputWindow min(input, context)", "min(input, context)", "not capped", true);
+    }
+    if (hostShare !== RESERVE_SHARE) {
+      contract("core compaction RESERVE_SHARE", RESERVE_SHARE, hostShare, true);
+    }
+    if (hostMin !== RESERVE_MIN) {
+      contract("core compaction RESERVE_MIN", RESERVE_MIN, hostMin, true);
+    }
+    if (hostOutputMax !== 256_000) {
+      // Advisory: the reply cap sizes the output, not the trigger, so it changes
+      // no percentage; it still fails under --strict before a release.
+      contract(
+        "core OUTPUT_TOKEN_MAX",
+        "not modelled",
+        hostOutputMax == null ? "constant removed" : hostOutputMax,
+        false,
+      );
+    }
+  }
+
+  if (drifts.length === 0) {
+    if (contractChecked) {
+      console.log(
+        "[drift-watch OK] OpenTUI pin, @opencode/plugin types and the compaction ceiling are aligned with the released host.",
+      );
+    } else {
+      console.log(
+        "[drift-watch OK] OpenTUI pin and @opencode/plugin types are aligned with the released host; " +
+          "the compaction contract was NOT verified (see warning above).",
+      );
+    }
     return;
   }
 
