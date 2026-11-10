@@ -12,11 +12,11 @@
 // itself after the desktop app's background server restarts (ctx.client is read
 // on every call for exactly that reason).
 
-import { For, Show, createEffect, createSignal, onCleanup } from "solid-js"
+import { For, Show, createEffect, createMemo, createSignal, onCleanup } from "solid-js"
 import { usePlugin, type MountedSession } from "@opencode/plugin/gui"
 import { DesktopContextRpc } from "../lib/rpc.js"
 import type { DesktopFamilyResult, DesktopRow } from "../lib/rpc.js"
-import { fmt } from "../lib/format.js"
+import { fmt, sumCtx } from "../lib/format.js"
 
 const POLL_MS = 1500
 
@@ -135,6 +135,15 @@ const styles = {
     gap: "8px",
     "font-size": "11px",
   },
+  totalRow: {
+    display: "grid",
+    "grid-template-columns": "1fr auto auto",
+    "align-items": "center",
+    gap: "6px",
+    "padding-top": "6px",
+    "border-top": "1px solid rgba(128,128,128,0.3)",
+    "font-weight": "600",
+  },
   subName: {
     overflow: "hidden",
     "text-overflow": "ellipsis",
@@ -197,17 +206,23 @@ export function ContextPanel(props: { session: MountedSession }) {
   // Heaviest child first: a family can hold a dozen subagents and the RPC order
   // is the parentID walk order, which buries the session that is actually eating
   // the window. `slice()` first - `rows()` is the polled snapshot and the RPC
-  // array must not be reordered in place.
-  const children = () =>
+  // array must not be reordered in place. A memo keeps the sort out of every
+  // reactive read (the list is read four times per render pass).
+  const children = createMemo(() =>
     rows()
       .slice(1)
-      .sort((a, b) => (b.ctx || 0) - (a.ctx || 0))
+      .sort((a, b) => (b.ctx || 0) - (a.ctx || 0)),
+  )
 
   const barWidth = (tokens: number) => {
     const total = root()?.ctx || 0
     if (total <= 0 || tokens <= 0) return "0%"
     return `${Math.min(100, Math.max(2, Math.round((tokens / total) * 100)))}%`
   }
+
+  // Whole family: every session's own context usage added up. Labelled in the
+  // UI as a sum across windows, because each subagent has its own window.
+  const familyTotal = () => sumCtx(rows())
 
   return (
     <div style={styles.panel}>
@@ -298,6 +313,14 @@ export function ContextPanel(props: { session: MountedSession }) {
                       </div>
                     )}
                   </For>
+                </div>
+                <div
+                  style={styles.totalRow}
+                  title="Sum of each session's own context usage (every session has its own window)"
+                >
+                  <span style={styles.label}>Family total</span>
+                  <span style={styles.value}>{fmt(familyTotal())}</span>
+                  <span style={styles.share}>{rows().length} sessions</span>
                 </div>
               </Show>
             </>

@@ -1593,6 +1593,20 @@ check("T28f diff: a model switch shows the window change only", () => {
   assert(diff.includes("total 1.0k -> 3.0k"), diff);
 });
 
+const formatMod = await import(pathToFileURL(join(repoRoot, "lib", "format.js")).href);
+// The TUI panel imports the helper through lib/tui-data.js, whose hand-written
+// .d.ts would keep tsc green even if the runtime re-export disappeared.
+const tuiDataMod = await import(pathToFileURL(join(repoRoot, "lib", "tui-data.js")).href);
+check("T28g family total: sums each session's own ctx, ignores bad values", () => {
+  assert(formatMod.sumCtx([{ ctx: 100 }, { ctx: 250 }]) === 350, "sums rows");
+  assert(
+    formatMod.sumCtx([{ ctx: 100 }, { ctx: -5 }, { ctx: NaN }, { ctx: "9" }, null]) === 100,
+    "ignores negative / non-finite / non-numeric / null rows",
+  );
+  assert(formatMod.sumCtx(null) === 0, "null -> 0");
+  assert(tuiDataMod.sumCtx === formatMod.sumCtx, "tui-data must re-export the shared helper");
+});
+
 cacheMod.breakdownCache.delete("ses_DIFF_FRESH");
 quietErr(() => mod.writeStateFile("ses_DIFF_FRESH", "model-gamma", "test-provider", 500, 500, 0));
 const t28FreshReport = await mod.collectSessionReport(mockCtx, "ses_DIFF_FRESH", read(), 0);
@@ -3340,6 +3354,32 @@ console.log("\n(g) Desktop GUI bundle...");
     if (!existsSync(srcAbs)) fatal(`${rel} is missing - the GUI sources moved?`);
     if (statSync(srcAbs).mtimeMs > bundleMtime) {
       fatal(`${bundleRel} is older than ${rel} - run: npm run build:gui`);
+    }
+  }
+  // The family-total row must survive minification: its label is user-visible
+  // and the row is the only place the summed family usage is shown.
+  for (const needle of ["Family total", "Subagents"]) {
+    if (!bundle.includes(needle)) {
+      fatal(`${bundleRel} lost the family-total row (missing "${needle}") - rebuild it`);
+    }
+  }
+  // The needles above only prove the row exists, not what it prints. The row
+  // must sum the family (sumCtx), not print the root session's own ctx, which
+  // would claim a single window. Minified identifiers are renamed, so check the
+  // JSX source the bundle was built from.
+  {
+    const panelPath = join(repoRoot, "gui", "panel.tsx");
+    if (!existsSync(panelPath)) {
+      fatal("gui/panel.tsx is missing - the Desktop panel source is gone");
+    }
+    const panelSrc = readFileSync(panelPath, "utf8");
+    const rowAt = panelSrc.indexOf("styles.totalRow}");
+    if (rowAt < 0) fatal("gui/panel.tsx has no totalRow block - the family-total row is gone");
+    if (!panelSrc.slice(rowAt, rowAt + 600).includes("familyTotal(")) {
+      fatal("the Family total row no longer prints the family total - it must not print one session's ctx");
+    }
+    if (!/const familyTotal = \(\) => sumCtx\(/.test(panelSrc)) {
+      fatal("familyTotal() no longer sums the family (sumCtx) - printing one window's ctx would be wrong");
     }
   }
   pass(

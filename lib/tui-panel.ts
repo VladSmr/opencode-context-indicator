@@ -10,7 +10,7 @@ import { mkdirSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { basename, join } from "node:path"
 import type { StateEntry } from "./tui-data.js"
-import { collectFamily, fit, fmt, num, panelLayout, toolOutEntries, updatedCell } from "./tui-data.js"
+import { collectFamily, fit, fmt, num, panelLayout, sumCtx, toolOutEntries, updatedCell } from "./tui-data.js"
 import { token } from "./tui-theme.js"
 import { c as comp, h } from "./tui-h.ts"
 import {
@@ -601,6 +601,13 @@ export function BreakdownPanel(props: {
     )
   }
 
+  // Whole family: every session's own context usage added up. Each session has
+  // its OWN window, so this is a total of tokens used, not one window's fill.
+  // Kept short: at the default 60 columns this is 56 columns in the worst case
+  // the panel can show (4-digit token total, 2-digit session count).
+  const totalLine = (): string =>
+    `family total ${fmt(sumCtx(data().rows))} across ${data().rows.length} sessions (sum of windows)`
+
   // One compact line: the main session's tool results split by tool name
   // (server-side aggregate; the per-call "largest contributors" block above is
   // the measured, client-side view).
@@ -680,6 +687,14 @@ export function BreakdownPanel(props: {
                 .rows.map((e, i) =>
                   mutedText(() => row(e, i === 0)),
                 ),
+              comp(Show, {
+                get when() {
+                  return data().rows.length > 1
+                },
+                get children() {
+                  return mutedText(() => totalLine())
+                },
+              }),
               comp(Show, {
                 get when() {
                   return data().rows.some((e) => e.compactStale === true)

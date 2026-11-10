@@ -71,6 +71,12 @@ export declare function collectFamily(
 ): StateEntry[]
 export declare function fmt(n: number): string
 export declare function num(v: unknown): number
+export declare function sumCtx(
+  rows:
+    | ReadonlyArray<{ ctx?: unknown } | null | undefined>
+    | null
+    | undefined,
+): number
 export declare function fit(s: string, w: number): string
 export declare function updatedAt(iso: string | undefined): string
 export declare function updatedCell(

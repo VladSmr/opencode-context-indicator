@@ -4,6 +4,18 @@ Notable user-facing changes per release. Dates are commit days (UTC).
 The package also ships a dual V1/V2 plugin — see the README for the surface
 matrix; everything below concerns the V2 path unless stated otherwise.
 
+## 1.9.1 — 2026-11-10
+
+- **Family total row.** The TUI `/cx` panel and the Desktop context tab now print
+  the sum of every session's own `ctx` in the family plus the session count
+  (`family total 651.6k across 7 sessions`). Each session has its own window, so
+  this is a total of tokens used, not one window's occupancy; the per-session
+  percentages stay relative to each session's own `usable`. The sum comes from
+  one pure helper (`sumCtx` in `lib/format.js`) shared by both surfaces, so the
+  two cannot drift; a new check (T28g) pins its arithmetic and the TUI re-export,
+  and the gate that inspects the Desktop bundle now fails if the row disappears
+  from the build or stops summing the family. The harness is 116 checks.
+
 ## 1.9.0 — 2026-11-07
 
 - **`/context` and `/context-breakdown` are removed; `/context-diff` stays.**
@@ -59,7 +71,7 @@ matrix; everything below concerns the V2 path unless stated otherwise.
   cap is advisory (it sizes the reply, not the trigger) and fails only under
   `--strict`.
 - T44 pins the released formula offline, including the exact `2 * 16_000`
-  boundary and the buffer-override rules; the harness is now 115 checks.
+  boundary and the buffer-override rules; the harness shipped with 115 checks.
 
 ## 1.8.4 — 2026-11-06
 
