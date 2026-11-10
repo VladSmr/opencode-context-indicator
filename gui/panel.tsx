@@ -1,7 +1,7 @@
 // gui/panel.tsx
 //
-// The Desktop side-panel tab: the same numbers as /context-breakdown and the
-// TUI panel, laid out for a narrow region. This file is bundled by Vite
+// The Desktop side-panel tab: the eight category rows of the TUI sidebar plus
+// the per-subagent rollup, laid out for a narrow region. This file is bundled by Vite
 // (vite.gui.config.mjs), NOT by the OpenTUI transform - it renders DOM in the
 // desktop app's window, so there is no @opentui pragma and no OpenTUI import.
 //

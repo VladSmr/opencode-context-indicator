@@ -40,7 +40,7 @@
  *     categories: user / assistant / reasoning / tool(args only) / system
  *       prompt / tool schemas / other(= input - sum of estimates) + subagents.
  *
- *   V2 sources (verified against @opencode/plugin 2.0.16 / @opencode/schema):
+ *   V2 sources (verified against @opencode/plugin 2.2.7 / @opencode/schema):
  *     - ctx.session.hook("context", cb)
  *         SessionContext = { sessionID, model: {providerID,id,variant?},
  *           system: SystemPart[] (mut), messages: Message[] (mut),
@@ -66,35 +66,25 @@
  *   session.step.ended (keyed by the child's own sessionID). This is
  *   event-driven and does not need the removed API.
  *
- *   V2 slash commands (added 1.1.0, verified against the live Desktop 2.0.19
- *   plugin runtime). Three commands:
- *     - /context — a 3-line summary of THIS session only (model, tokens, %,
- *       updated + category line). Main only: NO subagent traversal and NO live
- *       RPC (cache + state.json only), so it is instant. Delivered with
- *       resume:true (like /context-breakdown), so the model echoes the summary
- *       into the transcript; the chip label (`description`) is self-contained:
- *       "Context: 41.5k (25%) · your-model · 12:36".
- *     - /context-breakdown — the full markdown table (main + all subagent
- *       descendants), collected in parallel under one budget. Delivered with
- *       resume:true and a verbatim instruction prefix, so the agent echoes the
- *       table into the transcript as a normal message (rendered in full by the
- *       Desktop); resume:false remains a one-constant fallback. Includes the
- *       top-5 heaviest single context consumers (main).
- *     - /context-diff — the previous distinct measurement (ctx + per-category
- *       deltas) vs the current one, main only, cache + state.json only. Also
- *       delivered with resume:true under a <context-diff> tag.
+ *   V2 slash command (added 1.1.0, verified against the live Desktop 2.0.19
+ *   plugin runtime; the two sibling commands were removed in 1.9.0 because the
+ *   TUI /cx panel and the Desktop panel tab cover the same numbers):
+ *     - /context-diff - the previous distinct measurement (ctx + per-category
+ *       deltas) vs the current one, main session only, cache + state.json only.
+ *       Delivered with resume:true under a <context-diff> tag, so the model
+ *       echoes the delta into the transcript as a normal assistant message.
  *     - ctx.command.transform(editor => editor.add({ name, description,
- *         execute })) — registers a slash command; `execute` receives the
+ *         execute })) - registers a slash command; `execute` receives the
  *       invocation { sessionID, prompt:{text,files,agents,skills}, delivery }.
- *     - ctx.session.synthetic({ sessionID, text, description?, resume? }) —
+ *     - ctx.session.synthetic({ sessionID, text, description?, resume? }) -
  *       durably ADMITS a synthetic message to the session INBOX. `resume` only
  *       gates whether the session is woken (Session.synthetic:
  *       `if (resume !== false) wake(session)`): resume:true starts an agent turn
  *       (grows session context), resume:false leaves a durable notice without
  *       running the agent loop. A synthetic message is always shown as a compact
  *       Notice chip whose label is `description ?? text` (client row-builder:
- *       `synthetic` -> Notice), which is exactly why /context-breakdown uses
- *       resume:true: the model answer, not the chip, carries the full table.
+ *       `synthetic` -> Notice), which is exactly why the command uses
+ *       resume:true: the model answer, not the chip, carries the payload.
  *     - session list = the parentID chain persisted in state.json (BFS from the
  *       root; see collectDescendantSessionIDs). state.json is the ONLY source:
  *       every entry is keyed by its own sessionID and carries the parentID
@@ -158,18 +148,11 @@ import { makeV1 } from "./lib/v1.js";
 import { handleV2Event, onV2Context, onV2Compaction, estimateBreakdownFromContext, estimateBreakdownFromClientMessages } from "./lib/v2.js";
 import { breakdownCategories, computeReclaim, contentFingerprint, estimateTokens, extractToolTarget, isSafeSessionKey, safeCell, safeReclaim, safeSaneOrNull, safeToolOutByTool, sumCategories, toolOutEntries } from "./lib/estimate.js";
 import {
-  commandContextBreakdown,
   commandContextDiff,
-  commandContextSummary,
-  CONTEXT_BREAKDOWN_RESUME,
   REPLY_ONLY,
   taggedPayload,
   collectSessionReport,
-  renderSessionRow,
-  renderBreakdownTable,
   renderContextDiff,
-  shortSummaryText,
-  shortSummaryDescription,
 } from "./lib/commands.js";
 import {
   ensureModelLimits,
@@ -209,14 +192,10 @@ export {
   reserveFor,
   resetConfiguredBufferCache,
   collectSessionReport,
-  renderSessionRow,
-  renderBreakdownTable,
   renderContextDiff,
   commandContextDiff,
   REPLY_ONLY,
   taggedPayload,
-  shortSummaryText,
-  shortSummaryDescription,
   ensureModelLimits,
   readStateSnapshot,
   estimateBreakdownFromContext,
@@ -299,10 +278,10 @@ export default {
       logErr("model limits prefetch failed", err),
     );
 
-    // Three V2 slash commands (V2 only): /context (instant per-session
-    // summary), /context-breakdown (full table, main + all subagent
-    // descendants), /context-diff (delta vs the previous measurement).
-    // Guarded: older 2.0.x builds may lack ctx.command / ctx.session.synthetic —
+    // One V2 slash command (/context-diff): the delta vs the previous
+    // measurement. The full breakdown is not a command any more - the TUI /cx
+    // panel and the Desktop panel tab show it without spending an agent turn.
+    // Guarded: older 2.0.x builds may lack ctx.command / ctx.session.synthetic -
     // registering a command whose handler cannot deliver would fail silently.
     try {
       const canCommand =
@@ -313,23 +292,6 @@ export default {
         registrations.push(
           await ctx.command.transform((editor) => {
             try {
-              editor.add({
-                name: "context",
-                description:
-                  "Quick context summary for the current session (compact notice)",
-                execute: (invocation) =>
-                  commandContextSummary(ctx, invocation, { name: "context" }),
-              });
-              editor.add({
-                name: "context-breakdown",
-                description:
-                  "Full per-session context breakdown table (main + subagents), rendered by the model",
-                execute: (invocation) =>
-                  commandContextBreakdown(ctx, invocation, {
-                    resume: CONTEXT_BREAKDOWN_RESUME,
-                    name: "context-breakdown",
-                  }),
-              });
               editor.add({
                 name: "context-diff",
                 description:

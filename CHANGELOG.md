@@ -4,12 +4,48 @@ Notable user-facing changes per release. Dates are commit days (UTC).
 The package also ships a dual V1/V2 plugin — see the README for the surface
 matrix; everything below concerns the V2 path unless stated otherwise.
 
-## 1.8.5 — 2026-11-07
+## 1.9.0 — 2026-11-07
 
+- **`/context` and `/context-breakdown` are removed; `/context-diff` stays.**
+  Both removed commands spent a real agent turn (they delivered through
+  `resume:true`) merely to make the model echo numbers the plugin already had.
+  The categories are rendered by the TUI sidebar (terminal) and by the Desktop
+  context tab; the family/cost view and the measured contributors are in the TUI
+  `/cx` panel — all from the same `state.json` snapshot, **without** an LLM call.
+  `/context-diff` still answers "what changed since the last measurement". The
+  dead renderers behind the removed commands (`renderSessionRow`,
+  `renderBreakdownTable`, `renderTopSection`, `renderCacheLine`,
+  `renderReclaimSection`, `renderToolOutLine`, `shortSummary*`, `sourceTag`,
+  `topLabel`, `CONTEXT_BREAKDOWN_RESUME`) are gone; the family collection they
+  shared with the Desktop RPC (`collectFamilyReports`) is kept.
+- **The "top context consumers" feature is removed entirely.** It belonged to
+  `/context-breakdown` alone and had no renderer left: the candidate tracking in
+  the context-hook estimator, the `top` field in the persisted snapshot, its
+  sanitiser (`safeTop`) and T27/T27a/T27b are gone, which also trims work from
+  every measured request. The per-tool split, prompt cache and reclaim totals
+  remain visible in the `/cx` panel.
+- Anything that scripted the removed commands should read
+  `opencode-context-indicator-state.json` instead. If a workflow needs the
+  commands themselves, pin the previous line (`npm install
+  opencode-context-indicator@1.8`); they are documented in the README under
+  "Removed in 1.9.0" as deprecated. Delivery of `/context-diff` is unchanged:
+  one agent turn, `<context-diff>`-tagged payload.
+- **Aligned with opencode 2.2.7 / OpenTUI 0.8.1.** Dev dependencies and the
+  typecheck target `@opencode/plugin` 2.2.7 and `@opentui/core` +
+  `@opentui/solid` 0.8.1; the isolated load + state-write e2e is re-run against
+  the 2.2.7 Desktop CLI. The 2.2.6 -> 2.2.7 diff in `@opencode/plugin` is
+  additive (an experimental `experimental.model.resolve` session hook with
+  `SessionModelResolve`, declared in both the effect and promise session
+  typings); the server and TUI declarations this plugin uses are unchanged, so
+  no runtime change was needed. The earlier 2.2.6 diff was likewise additive
+  (`gui/*.d.ts` gained `Panel.width`, `Layout.side.resize/width`, `CodeBlock`,
+  `ThemeSeedColors` and more settings UI); those GUI members are left for a
+  follow-up, tracked outside this release.
 - **The compaction ceiling is verified against the released core and guarded
   automatically.** No runtime change: the plugin already computes `window =
   min(input, context)` and `reserve = max(floor(window * 0.15), window >=
-  2 * 16_000 ? 16_000 : 0)`, exactly `calculateCeiling()` in opencode 2.2.5.
+  2 * 16_000 ? 16_000 : 0)`, exactly `calculateCeiling()` in opencode 2.2.5
+  through 2.2.7.
   Merged PR #51271 describes a 10% reserve in its body, but only its reply cap
   shipped (`OUTPUT_TOKEN_MAX = 256_000` in `session/model-request.ts`); the
   trigger stayed at 15%, and the unreleased `v2` branch (10%, and no
@@ -23,7 +59,7 @@ matrix; everything below concerns the V2 path unless stated otherwise.
   cap is advisory (it sizes the reply, not the trigger) and fails only under
   `--strict`.
 - T44 pins the released formula offline, including the exact `2 * 16_000`
-  boundary and the buffer-override rules; the harness is now 117 checks.
+  boundary and the buffer-override rules; the harness is now 115 checks.
 
 ## 1.8.4 — 2026-11-06
 

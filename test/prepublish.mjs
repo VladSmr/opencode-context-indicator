@@ -478,6 +478,9 @@ process.env.OPENCODE_CONTEXT_INDICATOR_STATE_FILE = HARNESS_STATE;
 // Same isolation for the human-readable log: idle/compacted handlers rewrite
 // it, so point them at a throwaway file instead of the user's real one.
 process.env.OPENCODE_CONTEXT_INDICATOR_LOG_FILE = join(tmpdir(), "oci-prepublish-log.log");
+// And the cross-instance dedup markers: claimOnce writes tiny marker files with
+// a 24h TTL, so without this the harness would leave them in the user's dir.
+process.env.OPENCODE_CONTEXT_INDICATOR_DEDUP_DIR = join(tmpdir(), "oci-prepublish-dedup");
 // The limits path now also honours the user's configured `compaction.buffer`.
 // Point the global lookup at an empty throwaway tree BEFORE importing index.js
 // so a developer's own config can never change the expected 15% reserves
@@ -548,32 +551,25 @@ mod.modelLimits.clear(); mod.sessionAgentCache.clear(); mod.sessionParentCache.c
 capture(() => mod.hydrateModelLimitsFromState());
 const state1 = read();
 const repMain = await mod.collectSessionReport(mockCtx,"ses_MAIN",state1,Date.now()+2000);
-const rowMain = mod.renderSessionRow(repMain, true);
-check("T4 main row keeps the % (denominator from state)", () => {
+check("T4 main report keeps the denominator from state", () => {
   // Derived: usable=445645; ctx=279312; pct=279312/445645=63%
   assert(repMain.usable === 445645);
-  assert(rowMain.startsWith("| main |"));
-  assert(rowMain.includes("(63%)"), rowMain);
+  assert(repMain.ctxTokens === 279312);
+  assert(Math.round((repMain.ctxTokens / repMain.usable) * 100) === 63);
 });
 
 // T4b
-const sumText = mod.shortSummaryText(repMain);
-const sumDesc = mod.shortSummaryDescription(repMain);
-check("T4b /context summary shows denominator + % + compact-at", () => {
-  // ctx=279312, usable=445645, pct=63%, reserve=max(78643,16000)=78643
-  assert(sumText.includes("/ 445.6k (63%)"), sumText.split("\n")[0]);
-  assert(sumText.includes("compact at 445.6k"), sumText);
-  // fmt(78643) = "78.6k"
-  assert(sumText.includes("(78.6k reserve)"), sumText);
-  assert(sumDesc.includes("(63%)"), sumDesc);
+check("T4b report carries the compact-at reserve", () => {
+  // window 512k -> reserve=max(floor(0.15*524288),16000)=78643
+  assert(repMain.reserve === 78643, `reserve ${repMain.reserve}`);
 });
 
 // T5
 const repSub = await mod.collectSessionReport(mockCtx,"ses_OLDAGENT",state1,Date.now()+2000);
-const rowSub = mod.renderSessionRow(repSub, false);
-check("T5 old record shows sub:<agent> label", () => {
+check("T5 old record keeps the agent attribution", () => {
   assert(repSub.agent === "code_critic");
-  assert(rowSub.includes("sub:code_critic"), rowSub);
+  assert(repSub.parentID === "ses_MAIN");
+  assert(repSub.categories.user === 100, `user ${repSub.categories.user}`);
 });
 
 // T6
@@ -1116,18 +1112,9 @@ check("T19b compacted mark: stale even without a live breakdown (cross-instance)
   assert(read().ses_T19B.compactStale === true, "no-bd non-measuring write keeps the mark");
 });
 
-check("T19a stale surface: summary + table row show the marker", () => {
-  const report = {
-    sessionID: "ses_T19", modelID: "model-alpha", providerID: "test-provider",
-    ctxTokens: 480, usable: 170000, reserve: 18000,
-    categories: { user: 1, assistant: 1, reasoning: 0, toolArgs: 0, toolOut: 0, system: 1, toolSchemas: 1, other: 0 },
-    toolOutByTool: null, compactStale: true, source: "snapshot",
-    updatedAt: new Date().toISOString(),
-  };
-  assert(mod.shortSummaryText(report).includes("stale — compacted"), "summary carries the marker");
-  assert(mod.renderSessionRow(report, true).includes("(stale)"), "table row carries the marker");
-  const clean = { ...report, compactStale: false };
-  assert(!mod.shortSummaryText(clean).includes("stale"), "clean summary has no marker");
+const staleReport = await mod.collectSessionReport(mockCtx, "ses_T19B", read(), 0);
+check("T19a stale flag reaches the report", () => {
+  assert(staleReport.compactStale === true, JSON.stringify(staleReport.compactStale));
 });
 
 check("T20 toolOutByTool: hook estimator splits results per tool", () => {
@@ -1171,24 +1158,25 @@ check("T20b toolOutByTool: sanitised + bounded (proto dropped, overflow bucketed
   assert(bounded["other tools"] === 6, "overflow summed into the bucket");
 });
 
-check("T20c toolOutByTool: persisted end-to-end and rendered in the breakdown", () => {
-  mod.onV2Context({
-    sessionID: "ses_T20C",
-    messages: [{ role: "user", content: [
-      { type: "tool-result", name: "webfetch", result: { type: "text", value: "w".repeat(400) } },
-      { type: "tool-result", name: "read", result: { type: "text", value: "r".repeat(40) } },
-    ]}],
-    system: [],
-    tools: {},
-  });
-  mod.writeStateFile("ses_T20C", "model-alpha", "test-provider", 1000, 1000, 0);
+mod.onV2Context({
+  sessionID: "ses_T20C",
+  messages: [{ role: "user", content: [
+    { type: "tool-result", name: "webfetch", result: { type: "text", value: "w".repeat(400) } },
+    { type: "tool-result", name: "read", result: { type: "text", value: "r".repeat(40) } },
+  ]}],
+  system: [],
+  tools: {},
+});
+mod.writeStateFile("ses_T20C", "model-alpha", "test-provider", 1000, 1000, 0);
+// The Desktop RPC (and therefore the panel) reads the report, not state.json.
+// Past deadline -> state.json only, no live RPC.
+const t20cReport = await mod.collectSessionReport(mockCtx, "ses_T20C", read(), 0);
+check("T20c toolOutByTool: persisted end-to-end and carried into the report", () => {
   const e = read().ses_T20C;
   assert(e.toolOutByTool && e.toolOutByTool.webfetch === 100, `webfetch 100 persisted, got ${e.toolOutByTool?.webfetch}`);
   assert(e.toolOutByTool.read === 10, "read 10 persisted");
-  const row = mod.renderSessionRow({ sessionID: "ses_T20C", modelID: "model-alpha", ctxTokens: 1000, usable: 170000, categories: e.categories, toolOutByTool: e.toolOutByTool, source: "snapshot", updatedAt: e.updatedAt }, true);
-  const table = mod.renderBreakdownTable([row], 0, { toolOutByTool: e.toolOutByTool });
-  assert(table.includes("Tool results by tool (main)"), "by-tool section present");
-  assert(table.includes("webfetch 100"), `by-tool line lists webfetch 100: ${table.split("\n").slice(-1)[0]}`);
+  assert(t20cReport.toolOutByTool && t20cReport.toolOutByTool.webfetch === 100, "report carries the per-tool split");
+  assert(t20cReport.toolOutByTool.read === 10, "report carries read too");
 });
 
 check("T21 shared category helpers: sum + residual (both record shapes)", () => {
@@ -1263,13 +1251,9 @@ check("T23 prompt cache: persisted, inherited, never a category", () => {
 });
 
 const repT23 = await mod.collectSessionReport(mockCtx, "ses_T23", read(), Date.now() + 2000);
-check("T23a prompt cache: surfaced in the report / table / summary", () => {
+check("T23a prompt cache: surfaced in the report", () => {
   assert(mod.lastKnownCacheRead("ses_none") === null, "accessor -> null when unknown");
   assert(repT23.cacheRead === 600 && repT23.cacheWrite === 200, `report carries cache, got ${repT23.cacheRead}/${repT23.cacheWrite}`);
-  const table = mod.renderBreakdownTable([], 0, repT23);
-  assert(table.includes("Prompt cache"), "table has a prompt-cache section");
-  assert(table.includes("read 600"), `table shows read 600: ${table}`);
-  assert(mod.shortSummaryText(repT23).includes("prompt cache"), "summary shows the cache line");
 });
 
 check("T23b prompt cache: non-finite / absurd provider values are dropped", () => {
@@ -1337,19 +1321,20 @@ check("T24b hook estimator: repeated tool result via call-id correlation", () =>
   assert(parts.reclaim && parts.reclaim.tokens === 100 && parts.reclaim.count === 1, `reclaim 100/1, got ${JSON.stringify(parts.reclaim)}`);
 });
 
-check("T24c waste persisted path-free + rendered", () => {
-  mod.onV2Context({
-    sessionID: "ses_T24C",
-    messages: [
-      { role: "assistant", content: [{ type: "tool-call", id: "c1", name: "read", input: { filePath: "secret/path.ts" } }] },
-      { role: "user", content: [{ type: "tool-result", id: "c1", name: "read", result: { type: "text", value: "r".repeat(400) } }] },
-      { role: "assistant", content: [{ type: "tool-call", id: "c2", name: "read", input: { filePath: "secret/path.ts" } }] },
-      { role: "user", content: [{ type: "tool-result", id: "c2", name: "read", result: { type: "text", value: "r".repeat(400) } }] },
-    ],
-    system: [],
-    tools: {},
-  });
-  mod.writeStateFile("ses_T24C", "model-alpha", "test-provider", 1000, 1000, 0);
+mod.onV2Context({
+  sessionID: "ses_T24C",
+  messages: [
+    { role: "assistant", content: [{ type: "tool-call", id: "c1", name: "read", input: { filePath: "secret/path.ts" } }] },
+    { role: "user", content: [{ type: "tool-result", id: "c1", name: "read", result: { type: "text", value: "r".repeat(400) } }] },
+    { role: "assistant", content: [{ type: "tool-call", id: "c2", name: "read", input: { filePath: "secret/path.ts" } }] },
+    { role: "user", content: [{ type: "tool-result", id: "c2", name: "read", result: { type: "text", value: "r".repeat(400) } }] },
+  ],
+  system: [],
+  tools: {},
+});
+mod.writeStateFile("ses_T24C", "model-alpha", "test-provider", 1000, 1000, 0);
+const t24cReport = await mod.collectSessionReport(mockCtx, "ses_T24C", read(), 0);
+check("T24c waste persisted path-free and carried into the report", () => {
   const e = read().ses_T24C;
   assert(e.reclaim && e.reclaim.tokens === 100, `reclaim persisted, got ${JSON.stringify(e.reclaim)}`);
   const findings = e.reclaim.findings || [];
@@ -1357,16 +1342,9 @@ check("T24c waste persisted path-free + rendered", () => {
   for (const f of findings) {
     assert(!Object.prototype.hasOwnProperty.call(f, "target"), "persisted findings are path-free (no target)");
   }
-  const rep = {
-    sessionID: "ses_T24C", modelID: "model-alpha", providerID: "test-provider",
-    ctxTokens: 1000, inputTokens: 1000, usable: 170000, reserve: 18000,
-    categories: e.categories, toolOutByTool: e.toolOutByTool, reclaim: e.reclaim,
-    cacheRead: null, cacheWrite: null, compactStale: false, source: "snapshot",
-    updatedAt: e.updatedAt,
-  };
-  const table = mod.renderBreakdownTable([], 0, rep);
-  assert(table.includes("Potential reclaim"), "table has a reclaim section");
-  assert(table.includes("read x2"), `reclaim line lists read x2: ${table}`);
+  // The Desktop RPC reads the report: the reclaim total must survive the trip.
+  assert(t24cReport.reclaim && t24cReport.reclaim.tokens === 100, `report reclaim, got ${JSON.stringify(t24cReport.reclaim)}`);
+  assert(t24cReport.reclaim.count === e.reclaim.count, "report reclaim count matches the snapshot");
 });
 
 // T25 — compaction HOOK: the EXACT pre-compaction snapshot is persisted (and
@@ -1535,7 +1513,7 @@ check("T25d compaction hook that could not persist does not arm the guard", () =
   );
 });
 
-// ---- T26-T28: compaction reserve, top consumers, /context-diff ----
+// ---- T26-T28: compaction reserve, /context-diff ----
 
 const cacheMod = await import(pathToFileURL(join(repoRoot, "lib", "cache.js")).href);
 
@@ -1555,62 +1533,6 @@ check("T26 reserve mirrors core v2 calculateCeiling (15% share, 16k floor, 32k g
     const got = mod.reserveFor(win, undefined);
     assert(got === want, `window=${win}: reserve ${got} !== ${want}`);
   }
-});
-
-// T27 — top-5 heaviest single items: live estimate -> persisted (path-free) ->
-// rendered section.
-const t27Context = {
-  messages: [
-    { role: "user", content: [{ type: "text", text: "u".repeat(4000) }] }, // 1000
-    {
-      role: "assistant",
-      content: [
-        { type: "tool-call", id: "c1", name: "read", input: { filePath: "src/abc.ts" } },
-        { type: "tool-result", id: "c1", name: "read", result: { type: "text", value: "r".repeat(8000) } }, // 2000
-        { type: "reasoning", text: "x".repeat(2000) }, // 500
-        { type: "text", text: "a".repeat(1000) }, // 250
-      ],
-    },
-  ],
-  system: [{ type: "text", text: "s".repeat(400) }], // 100
-  tools: {},
-};
-const t27Parts = mod.estimateBreakdownFromContext(t27Context, null);
-check("T27 top consumers: heaviest first, bounded to 5, targets on live data", () => {
-  assert(Array.isArray(t27Parts.top) && t27Parts.top.length === 5, `got ${t27Parts.top?.length}`);
-  assert(t27Parts.top[0].kind === "tool" && t27Parts.top[0].tokens === 2000, JSON.stringify(t27Parts.top[0]));
-  assert(t27Parts.top[0].name === "read" && t27Parts.top[0].target === "src/abc.ts");
-  assert(t27Parts.top[1].kind === "user" && t27Parts.top[1].tokens === 1000);
-  assert(t27Parts.top[2].kind === "reasoning" && t27Parts.top[2].tokens === 500);
-  const kinds = t27Parts.top.map((t) => t.kind);
-  assert(kinds.includes("system") || kinds.includes("assistant"), kinds.join(","));
-});
-
-check("T27a top consumers: persisted copy is path-free and sanitised", () => {
-  cacheMod.breakdownCache.set("ses_TOP", {
-    ...t27Parts,
-    capturedAt: Date.now(),
-    source: "context-hook",
-  });
-  mod.writeStateFile("ses_TOP", "model-gamma", "test-provider", 6000, 6000, 0);
-  const e = read().ses_TOP;
-  assert(Array.isArray(e.top) && e.top.length === 5, `persisted top: ${JSON.stringify(e.top)}`);
-  assert(e.top[0].kind === "tool" && e.top[0].tokens === 2000);
-  assert(!("target" in e.top[0]), "target must not be persisted");
-  assert(!JSON.stringify(e.top).includes("src/abc.ts"), "no path leaked into state.json");
-});
-
-const t27Report = await mod.collectSessionReport(mockCtx, "ses_TOP", read(), 0);
-const t27Table = mod.renderBreakdownTable(
-  [mod.renderSessionRow(t27Report, true)],
-  0,
-  t27Report,
-);
-check("T27b top consumers: rendered section uses live targets + input share", () => {
-  assert(t27Report.top && t27Report.top[0].target === "src/abc.ts", "live cache keeps the target");
-  assert(t27Table.includes("### Top context consumers (main)"), t27Table);
-  assert(t27Table.includes("tool result · read src/abc.ts"), t27Table);
-  assert(t27Table.includes("~2.0k (33% of input)"), t27Table);
 });
 
 // T28 — /context-diff: previous distinct measurement, inherited on repeats.
@@ -1646,6 +1568,29 @@ check("T28a diff: renders total + category deltas", () => {
   assert(t28Diff.includes("(+1.0k tokens, +100%)"), t28Diff);
   assert(t28Diff.includes("| user | 0 | 1.0k | +1.0k |"), t28Diff);
   assert(t28Diff.includes("previous "), t28Diff);
+});
+
+check("T28f diff: a model switch shows the window change only", () => {
+  const now = new Date().toISOString();
+  const diff = mod.renderContextDiff({
+    modelID: "model-delta",
+    providerID: "test-provider",
+    ctxTokens: 3000,
+    usable: 10000,
+    categories: { user: 100, assistant: 200 },
+    updatedAt: now,
+    previous: {
+      model: "model-gamma",
+      ctx: 1000,
+      input: 1000,
+      categories: { user: 10, assistant: 20 },
+      updatedAt: now,
+    },
+  });
+  assert(diff.includes("model model-gamma -> model-delta"), diff);
+  assert(diff.includes("not comparable across models"), diff);
+  assert(!diff.includes("| user |"), "cross-model category rows must be omitted");
+  assert(diff.includes("total 1.0k -> 3.0k"), diff);
 });
 
 cacheMod.breakdownCache.delete("ses_DIFF_FRESH");
@@ -1952,7 +1897,6 @@ mod.breakdownCache.set("ses_SNAPSHOT", {
   systemChars: null,
   toolSchemasChars: null,
   reclaim: null,
-  top: [],
   capturedAt: Date.now(),
   source: "client-context",
 });
@@ -1972,7 +1916,6 @@ mod.breakdownCache.set("ses_SNAPSHOT", {
   systemChars: 2000,
   toolSchemasChars: 1000,
   reclaim: null,
-  top: [],
   capturedAt: Date.now(),
   source: "context-hook",
 });
@@ -2023,7 +1966,6 @@ check("T32 client-context fallback never shadows hook-measured categories", () =
     systemChars: 400,
     toolSchemasChars: 200,
     reclaim: null,
-    top: [],
     capturedAt: Date.now(),
     source: "context-hook",
   });
@@ -2041,7 +1983,6 @@ check("T32 client-context fallback never shadows hook-measured categories", () =
     systemChars: null,
     toolSchemasChars: null,
     reclaim: null,
-    top: [],
     capturedAt: Date.now() + 5000,
     source: "client-context",
   });
@@ -2065,7 +2006,6 @@ check("T32 client-context fallback never shadows hook-measured categories", () =
     systemChars: null,
     toolSchemasChars: null,
     reclaim: null,
-    top: [],
     capturedAt: Date.now(),
     source: "client-context",
   });
@@ -2183,7 +2123,6 @@ check("T32 client-context fallback never shadows hook-measured categories", () =
     systemChars: 300,
     toolSchemasChars: 100,
     reclaim: null,
-    top: [],
     capturedAt: Date.now(),
     source: "compaction-hook",
   });
@@ -2198,7 +2137,6 @@ check("T32 client-context fallback never shadows hook-measured categories", () =
     systemChars: null,
     toolSchemasChars: null,
     reclaim: null,
-    top: [],
     capturedAt: Date.now() + 5000,
     source: "client-context",
   });
@@ -2217,7 +2155,6 @@ check("T32 client-context fallback never shadows hook-measured categories", () =
     systemChars: 250,
     toolSchemasChars: null,
     reclaim: null,
-    top: [],
     capturedAt: Date.now(),
     source: "transform",
   });
@@ -2232,7 +2169,6 @@ check("T32 client-context fallback never shadows hook-measured categories", () =
     systemChars: null,
     toolSchemasChars: null,
     reclaim: null,
-    top: [],
     capturedAt: Date.now() + 5000,
     source: "client-context",
   });
@@ -2250,7 +2186,6 @@ check("T32 client-context fallback never shadows hook-measured categories", () =
     systemChars: 250,
     toolSchemasChars: null,
     reclaim: null,
-    top: [],
     capturedAt: Date.now(),
     source: "transform",
   });
@@ -2297,7 +2232,6 @@ check("T32 client-context fallback never shadows hook-measured categories", () =
     systemChars: null,
     toolSchemasChars: null,
     reclaim: null,
-    top: [],
     capturedAt: Date.now() + 5000,
     source: "client-context",
   });
@@ -2317,7 +2251,6 @@ check("T32 client-context fallback never shadows hook-measured categories", () =
     systemChars: null,
     toolSchemasChars: null,
     reclaim: null,
-    top: [],
     capturedAt: Date.now(),
     source: "client-context",
   });
@@ -2416,7 +2349,6 @@ check("T32 client-context fallback never shadows hook-measured categories", () =
     systemChars: null,
     toolSchemasChars: null,
     reclaim: null,
-    top: [],
     capturedAt: Date.now() - 1000,
     source: "fallback",
   });
@@ -2471,7 +2403,6 @@ check("T32 client-context fallback never shadows hook-measured categories", () =
     systemChars: 300,
     toolSchemasChars: 100,
     reclaim: null,
-    top: [],
     capturedAt: Date.now(),
     source: "context-hook",
   });
@@ -2490,7 +2421,6 @@ check("T32 client-context fallback never shadows hook-measured categories", () =
     systemChars: null,
     toolSchemasChars: null,
     reclaim: null,
-    top: [],
     capturedAt: Date.now(),
     source: "compaction-hook",
   });
@@ -2540,7 +2470,6 @@ check("T32 client-context fallback never shadows hook-measured categories", () =
     systemChars: null,
     toolSchemasChars: null,
     reclaim: null,
-    top: [],
     capturedAt: Date.now(),
     source: "compaction-hook",
   });
@@ -2591,7 +2520,6 @@ check("T32 client-context fallback never shadows hook-measured categories", () =
     systemChars: null,
     toolSchemasChars: null,
     reclaim: null,
-    top: [],
     capturedAt: Date.now(),
     source: "compaction-hook",
   });
@@ -2615,7 +2543,6 @@ check("T32 client-context fallback never shadows hook-measured categories", () =
     systemChars: 250,
     toolSchemasChars: null,
     reclaim: null,
-    top: [],
     capturedAt: Date.now(),
     source: "transform",
   });
@@ -2956,24 +2883,23 @@ check("T32 client-context fallback never shadows hook-measured categories", () =
 
   check("T40 taggedPayload: data first, single instruction last", () => {
     const body = "Context 10.0k / 100.0k (10%)\nmodel-alpha . 12:00:00\ncompact at 90.0k";
-    for (const tag of ["context-summary", "context-diff", "context-breakdown"]) {
-      const text = mod.taggedPayload(tag, body);
-      assert(text.startsWith(`<${tag}>\n`), `${tag}: payload must open the message`);
-      assert(text.includes(body), `${tag}: body lost`);
-      assert(text.trimEnd().endsWith(mod.REPLY_ONLY), `${tag}: instruction must be the last line`);
-      assert(
-        text.indexOf(mod.REPLY_ONLY) === text.lastIndexOf(mod.REPLY_ONLY),
-        `${tag}: the instruction must appear exactly once`,
-      );
-      assert(
-        text.indexOf(mod.REPLY_ONLY) > text.indexOf(`</${tag}>`),
-        `${tag}: the instruction must come AFTER the closing tag`,
-      );
-      assert(
-        text.indexOf(mod.REPLY_ONLY) !== 0,
-        `${tag}: nothing may precede the payload`,
-      );
-    }
+    const tag = "context-diff";
+    const text = mod.taggedPayload(tag, body);
+    assert(text.startsWith(`<${tag}>\n`), `${tag}: payload must open the message`);
+    assert(text.includes(body), `${tag}: body lost`);
+    assert(text.trimEnd().endsWith(mod.REPLY_ONLY), `${tag}: instruction must be the last line`);
+    assert(
+      text.indexOf(mod.REPLY_ONLY) === text.lastIndexOf(mod.REPLY_ONLY),
+      `${tag}: the instruction must appear exactly once`,
+    );
+    assert(
+      text.indexOf(mod.REPLY_ONLY) > text.indexOf(`</${tag}>`),
+      `${tag}: the instruction must come AFTER the closing tag`,
+    );
+    assert(
+      text.indexOf(mod.REPLY_ONLY) !== 0,
+      `${tag}: nothing may precede the payload`,
+    );
     // The imperative must not name the tags or the body: it is the last thing the
     // model reads, and a mention of the tags invites it to echo them.
     assert(!/<context-|verbatim/i.test(mod.REPLY_ONLY), "instruction must stay tag-free and short");
@@ -3052,7 +2978,7 @@ check("T32 client-context fallback never shadows hook-measured categories", () =
   const t41Bd = (model, over) => ({
     userChars: 500, assistantChars: 40, reasoningChars: 0, toolArgsChars: 0,
     toolOutChars: 0, toolOutByTool: {}, systemChars: 100, toolSchemasChars: 100,
-    reclaim: null, top: [], capturedAt: Date.now(), source: "context-hook", model,
+    reclaim: null, capturedAt: Date.now(), source: "context-hook", model,
     ...over,
   });
   writeFileSync(HARNESS_STATE, JSON.stringify({ ses_T41W: t41Base }), "utf8");

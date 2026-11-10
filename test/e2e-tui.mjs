@@ -17,6 +17,10 @@
  *                           a throwaway state file in %TEMP%; the live
  *                           opencode-context-indicator-state.json is never read
  *                           or written by the test.
+ *   • OPENCODE_CONTEXT_INDICATOR_LOG_FILE / OPENCODE_CONTEXT_INDICATOR_DEDUP_DIR
+ *                           a throwaway context-breakdown.log and dedup dir in
+ *                           %TEMP%; the owner's live log and dedup markers are
+ *                           never written by the test.
  *   • OPENCODE_DISABLE_PROJECT_CONFIG=1
  *                           the test does not read a project-level config.
  *   • Exactly ONE minimal LLM call ("Say OK") is made, in the isolated session.
@@ -98,6 +102,11 @@ for (const cand of CLI_CANDIDATES) {
 // ---------------------------------------------------------------------------
 const ISOLATED_DB    = join(tmpdir(), "oci-e2e.db");
 const ISOLATED_STATE = join(tmpdir(), "oci-e2e-state.json");
+// The plugin's own human-readable log + cross-instance dedup markers: both
+// default to the user's %TEMP%, so every check MUST redirect them or a real
+// "Say OK" round-trip would append to the owner's context-breakdown.log.
+const ISOLATED_LOG_FILE = join(tmpdir(), "oci-e2e-context-breakdown.log");
+const ISOLATED_DEDUP    = join(tmpdir(), "oci-e2e-dedup");
 const LIVE_STATE     = join(tmpdir(), "opencode-context-indicator-state.json");
 // Isolated global config directory (see header): the ONLY plugin entry is this
 // checkout's file:// URL, so Check A's "repo entrypoint" assertion cannot be
@@ -137,6 +146,8 @@ function childEnv(configDir) {
     ...process.env,
     OPENCODE_DB: ISOLATED_DB,
     OPENCODE_CONTEXT_INDICATOR_STATE_FILE: ISOLATED_STATE,
+    OPENCODE_CONTEXT_INDICATOR_LOG_FILE: ISOLATED_LOG_FILE,
+    OPENCODE_CONTEXT_INDICATOR_DEDUP_DIR: ISOLATED_DEDUP,
     OPENCODE_DISABLE_PROJECT_CONFIG: "1",
   };
   // Check A only: isolated config + fully private XDG roots (the data root
@@ -609,6 +620,8 @@ async function checkC() {
       XDG_STATE_HOME: join(CHECK_C_ROOT, "xdg-state"),
       OPENCODE_DB: join(CHECK_C_ROOT, "check-c.db"),
       OPENCODE_CONTEXT_INDICATOR_STATE_FILE: join(CHECK_C_ROOT, "state.json"),
+      OPENCODE_CONTEXT_INDICATOR_LOG_FILE: join(CHECK_C_ROOT, "context-breakdown.log"),
+      OPENCODE_CONTEXT_INDICATOR_DEDUP_DIR: join(CHECK_C_ROOT, "dedup"),
       OPENCODE_CONTEXT_INDICATOR_TUI_LIVENESS: CHECK_C_LIVE,
       OPENCODE_CONTEXT_INDICATOR_TUI_MARKER: "1",
     },
