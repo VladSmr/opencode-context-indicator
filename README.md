@@ -301,8 +301,13 @@ normal assistant message — the only way the content is visible in the Desktop
   the instruction line itself. The instruction now delimits the payload with an
   explicit `<context-diff>` tag, with the data first and one short "reply with
   only the content above" line last — an unambiguous payload boundary instead of
-  a leading "reproduce exactly" phrasing. Residual risk: a model may still add
-  light commentary or include the tag itself.
+  a leading "reproduce exactly" phrasing. The tail is a single clause on purpose
+  (the earlier four-clause version gave the model more text to paraphrase back),
+  and a unit check keeps it tag-free, single-line and at most 60 characters.
+  Residual risk: a model may still add
+  light commentary or include the tag itself. Removing the echo entirely would
+  need a no-turn render channel, which this host does not have: a
+  `resume:false` notice renders only the `description` chip, not the table.
 * **Deleted sessions are dropped immediately.** A `session.deleted` event removes
   the session's `state.json` entry - and every entry under it in the `parentID`
   chain - instead of waiting for the 7-day tombstone prune, so the row leaves
@@ -328,8 +333,10 @@ session shows the **family-aggregated** spend, each subagent its own — no more
 invisible subagent spend (upstream #45417). `s` opens a searchable picker over
 all family sessions (title / model / cost / running marker); `Enter` navigates
 there — root sessions focus their tab, subagent sessions switch the route.
-Under the table, a **`family total`** line sums each session's own `ctx` and
-prints the session count (a total of tokens used, not one window's fill).
+Above the table, a **`family total`** line sums each session's own `ctx` and
+prints the session count (a total of tokens used, not one window's fill), so it
+stays visible even when the family has hundreds of rows. Large sums are shown in
+millions (`10.3M`), matching the small `k` values elsewhere.
 
 The eight category rows are **not** repeated here: they live in the sidebar
 (and in the Desktop panel). Opening the panel full-screen hides the sidebar, so
@@ -390,10 +397,17 @@ current percentage.
 categories as value + bar + share of the context, the deterministic `HH:MM:SS`
 measurement time (host locale never changes the layout), the `source` tag
 (`live` / `snapshot` / `client-context` / `no-data`), a `stale after compaction`
-marker, the compaction reserve, one line per subagent with its own window
-and percentage, and a **`Family total`** row - the sum of every session's own
-`ctx` plus the session count (each session has its own window, so this is a
-total of tokens used, not one window's fill).
+marker, the compaction reserve, then a **`Family total`** row - the sum of every
+session's own `ctx` plus the session count (each session has its own window, so
+this is a total of tokens used, not one window's fill) - and one line per subagent
+with its own window and percentage. The total sits above the subagent list so it
+stays visible when a family has hundreds of sessions.
+
+Category rows with a measured **zero** are omitted (a real panel showed
+`Other 0 0%` under eight fixed rows); when nothing is measured yet the full
+eight-row layout stays, so a fresh session does not collapse into an empty block.
+The header tooltip carries `provider/model`, and a subagent running a **different
+model** than the root shows it next to its agent name.
 
 **Composer pill**: `38% ctx` above the composer, amber from 65 % and red from
 85 % of the usable window; clicking it opens the panel.
@@ -786,15 +800,23 @@ The E2E is fully **non-invasive** to your running OpenCode Desktop:
   `%TEMP%/oci-check-c` (nothing is shared with Check A or with your install);
 - any `opencode-cli` instance the test itself spawned is force-killed after each
   check (`serve --service` — your Desktop background service — is never touched);
-- exactly **one** minimal LLM call (`Say OK`) is made, in the isolated session.
+- exactly **one** minimal LLM call (`Say OK`) is made, in the isolated session;
+- a **passing** run deletes every artifact it created (`oci-e2e-*`, `oci-check-c`,
+  the throwaway DB/state/log and the TUI stamp), so repeated runs leave `%TEMP%`
+  clean. A **failing** run keeps them and prints their paths — the isolated log,
+  state and DB are the only evidence for the failure — and the next run starts by
+  clearing the same set. The unit gate does the same for its own
+  `oci-prepublish-*` files and dedup markers.
 
 The script prints `[e2e] running against ISOLATED opencode instance — your running
-sessions are not touched` at start and reports the Desktop service/GUI PIDs before
-and after the run. Override the binary with `OPENCODE_CLI`. The full run needs a
-model for the one round-trip: set `OPENCODE_E2E_MODEL` to *your* `provider/model`
-id (e.g. `OPENCODE_E2E_MODEL=myprovider/some-model`); it is **required** in full
-mode and the script exits with an instruction if it is unset. `--quick` needs no
-model.
+sessions are not touched` at start and snapshots the Desktop service/GUI PIDs
+before and after the run: a **difference fails** the run (the isolated test must
+never restart, kill or close your Desktop), while an unavailable snapshot is
+logged and the comparison is skipped. Override the binary with `OPENCODE_CLI`.
+The full run needs a model for the one round-trip: set `OPENCODE_E2E_MODEL` to
+*your* `provider/model` id (e.g. `OPENCODE_E2E_MODEL=myprovider/some-model`); it
+is **required** in full mode and the script exits with an instruction if it is
+unset. `--quick` needs no model.
 
 ### CI
 

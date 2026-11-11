@@ -603,8 +603,9 @@ export function BreakdownPanel(props: {
 
   // Whole family: every session's own context usage added up. Each session has
   // its OWN window, so this is a total of tokens used, not one window's fill.
-  // Kept short: at the default 60 columns this is 56 columns in the worst case
-  // the panel can show (4-digit token total, 2-digit session count).
+  // Kept short: the worst case the panel can show (4-digit session count, a
+  // millions-scale sum) is 56 columns at the default 60; fmt() switches to M
+  // above a million, so the line cannot grow past that.
   const totalLine = (): string =>
     `family total ${fmt(sumCtx(data().rows))} across ${data().rows.length} sessions (sum of windows)`
 
@@ -682,19 +683,21 @@ export function BreakdownPanel(props: {
           },
           get children() {
             return [
-              mutedText(() => columns()),
-              data()
-                .rows.map((e, i) =>
-                  mutedText(() => row(e, i === 0)),
-                ),
               comp(Show, {
                 get when() {
+                  // Above the table: a family can hold hundreds of sessions, and
+                  // a total below the last row is a total nobody ever sees.
                   return data().rows.length > 1
                 },
                 get children() {
                   return mutedText(() => totalLine())
                 },
               }),
+              mutedText(() => columns()),
+              data()
+                .rows.map((e, i) =>
+                  mutedText(() => row(e, i === 0)),
+                ),
               comp(Show, {
                 get when() {
                   return data().rows.some((e) => e.compactStale === true)

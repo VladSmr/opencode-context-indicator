@@ -125,6 +125,48 @@ const ISOLATED_LOG        = join(ISOLATED_DATA, "opencode", "log", "opencode.log
 // captures console output, so a log-based marker is unreachable; a file is
 // host-agnostic and deterministic.
 const TUI_LIVE_STAMP      = join(tmpdir(), "opencode-context-indicator", "tui-live.stamp");
+// Check C works inside its own throwaway root: pack -> extract -> config ->
+// liveness log. Declared here so the artifact cleanup below owns every path this
+// script creates.
+const CHECK_C_ROOT    = join(tmpdir(), "oci-check-c");
+const CHECK_C_PKG_DIR = join(CHECK_C_ROOT, "node_modules", "opencode-context-indicator");
+const CHECK_C_CONFIG  = join(CHECK_C_ROOT, "config");
+const CHECK_C_LIVE    = join(CHECK_C_ROOT, "liveness.log");
+
+// Everything this script creates under %TEMP%. A passing run removes all of it,
+// so repeated runs do not leave `oci-e2e-*` / `oci-check-c` trees behind; a
+// failing run keeps them (and says where they are) because the logs and the
+// isolated state are the evidence. None of these paths is ever read or written
+// by the live Desktop, so the cleanup is safe for the owner's data.
+const ARTIFACT_DIRS = [
+  ISOLATED_CONFIG_DIR,
+  ISOLATED_DATA,
+  ISOLATED_CACHE,
+  ISOLATED_STATE_ROOT,
+  ISOLATED_DEDUP,
+  CHECK_C_ROOT,
+];
+const ARTIFACT_FILES = [
+  ISOLATED_DB,
+  `${ISOLATED_DB}-wal`,
+  `${ISOLATED_DB}-shm`,
+  ISOLATED_STATE,
+  ISOLATED_LOG_FILE,
+];
+
+function cleanupArtifacts() {
+  let failed = 0;
+  for (const dir of ARTIFACT_DIRS) {
+    try { rmSync(dir, { recursive: true, force: true }); } catch { failed++; }
+  }
+  for (const file of ARTIFACT_FILES) {
+    try { unlinkSync(file); } catch { /* already gone is the normal case */ }
+  }
+  // The stamp lives in a shared directory (the plugin's tmp root), so remove the
+  // file only, never the directory.
+  try { unlinkSync(TUI_LIVE_STAMP); } catch { /* ok */ }
+  return failed;
+}
 
 function writeIsolatedConfig() {
   const entrypoint = pathToFileURL(repoRoot).href;
@@ -139,6 +181,11 @@ function writeIsolatedConfig() {
   rmSync(ISOLATED_DATA, { recursive: true, force: true });
   try { unlinkSync(TUI_LIVE_STAMP); } catch { /* ok */ }
 }
+
+// Start from a clean slate: a previous run's tree must not leak into this one
+// (the log assertions, the config and Check C's pack all assume they own their
+// paths). The same function removes everything again after a passing run.
+cleanupArtifacts();
 writeIsolatedConfig();
 
 function childEnv(configDir) {
@@ -304,11 +351,16 @@ function runPty(extraArgs, timeoutMs, isDone, graceMs = 0, configDir, extraEnv) 
   });
 }
 
-// Best-effort Desktop fingerprint (Windows only, never fatal).
+// Best-effort Desktop fingerprint (Windows only). `null` means the PROBE failed
+// (other platform, WMI/powershell timeout or error) and "" means the probe ran
+// and found no Desktop process - the caller distinguishes the two: an
+// unavailable probe is logged and skipped, while a changed set FAILS the run.
+// That also catches a Desktop closed mid-run (non-empty -> ""), which a single
+// "both non-empty" condition would have skipped.
 // Name filter is explicit so the probe's own powershell (whose command line
 // contains the "serve --service" search string) is NOT matched.
 function desktopSnapshot() {
-  if (process.platform !== "win32") return "";
+  if (process.platform !== "win32") return null;
   const psCmd = 'Get-CimInstance Win32_Process | Where-Object { ($_.Name -eq \'OpenCode.exe\') -or ($_.Name -eq \'opencode-cli.exe\' -and $_.CommandLine -like \'*serve --service*\') } | Sort-Object ProcessId | ForEach-Object { "$($_.ProcessId) $($_.Name)" }';
   try {
     const r = spawnSync(
@@ -317,8 +369,11 @@ function desktopSnapshot() {
       // Hard timeout: a stuck WMI/CIM service must not hang the whole e2e.
       { encoding: "utf8", timeout: 15_000 },
     );
+    // A timeout sets r.error and r.status = null; a crashing powershell exits
+    // non-zero. Both are "no answer", not "no Desktop".
+    if (r.error || r.status !== 0) return null;
     return (r.stdout || "").trim();
-  } catch { return ""; }
+  } catch { return null; }
 }
 
 // Lingering-instance cleanup: the --standalone opencode-cli can survive the
@@ -521,11 +576,6 @@ async function checkB() {
 // a `ref` on a getter-driven text node, sampled every 250 ms. A frozen tree
 // writes the same rendered text forever.
 // ---------------------------------------------------------------------------
-const CHECK_C_ROOT    = join(tmpdir(), "oci-check-c");
-const CHECK_C_PKG_DIR = join(CHECK_C_ROOT, "node_modules", "opencode-context-indicator");
-const CHECK_C_CONFIG  = join(CHECK_C_ROOT, "config");
-const CHECK_C_LIVE    = join(CHECK_C_ROOT, "liveness.log");
-
 function preparePackedInstall() {
   rmSync(CHECK_C_ROOT, { recursive: true, force: true });
   const packOut = join(CHECK_C_ROOT, "pack");
@@ -693,6 +743,17 @@ async function checkC() {
 // gate can never hang forever.
 function finish(code) {
   process.exitCode = code;
+  // A passing run leaves no `oci-e2e-*` / `oci-check-c` trees behind; a failing
+  // one keeps them and prints their paths, because the isolated log, state and
+  // DB are the only evidence for the failure. Runs start by cleaning the same
+  // set, so a leftover tree never affects the next run.
+  if (code === 0) {
+    const left = cleanupArtifacts();
+    if (left > 0) console.log(`[e2e] could not remove ${left} artifact dir(s) under ${tmpdir()}`);
+  } else {
+    console.log("\n[e2e] isolated artifacts kept for diagnosis:");
+    for (const p of [...ARTIFACT_DIRS, ...ARTIFACT_FILES]) console.log(`  ${p}`);
+  }
   const watchdog = setTimeout(() => {
     console.error("[e2e] event loop did not drain; forcing termination");
     process.kill(process.pid, "SIGKILL");
@@ -753,12 +814,29 @@ async function main() {
     const c = await checkC();
     if (!c) { console.error("\n[e2e FAILED] Check C"); finish(1); return; }
 
+    // The live Desktop must not be disturbed by the isolated run: a different
+    // PID set means the test (or something it spawned) restarted, killed or
+    // closed it, so the check FAILS instead of only printing a note. A manual
+    // restart or an app update during the run produces the same difference - the
+    // message says so instead of blaming the test alone. A FAILED probe (null on
+    // both sides or on the after side) is logged and skipped, never failed.
     const desktopAfter = desktopSnapshot();
-    if (desktopBefore && desktopAfter) {
+    if (desktopBefore === null || desktopAfter === null) {
+      console.log("\n[desktop] snapshot unavailable - the live-Desktop PID check was skipped");
+    } else {
       const unchanged = desktopBefore === desktopAfter;
+      const show = (snap) => (snap ? snap.split("\n").join(", ") : "(no Desktop process)");
       console.log(`\n[desktop] OpenCode Desktop PIDs ${unchanged ? "unchanged \u2713" : "CHANGED \u2717"}`);
-      console.log(`[desktop] before: ${desktopBefore.split("\n").join(", ")}`);
-      console.log(`[desktop] after:  ${desktopAfter.split("\n").join(", ")}`);
+      console.log(`[desktop] before: ${show(desktopBefore)}`);
+      console.log(`[desktop] after:  ${show(desktopAfter)}`);
+      if (!unchanged) {
+        console.error(
+          "\n[e2e FAILED] the live OpenCode Desktop PID set changed during the run" +
+            " - verify no manual restart/update happened and re-run",
+        );
+        finish(1);
+        return;
+      }
     }
   }
 

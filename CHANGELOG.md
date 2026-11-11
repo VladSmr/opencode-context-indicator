@@ -4,6 +4,43 @@ Notable user-facing changes per release. Dates are commit days (UTC).
 The package also ships a dual V1/V2 plugin — see the README for the surface
 matrix; everything below concerns the V2 path unless stated otherwise.
 
+## 1.9.2 — 2026-11-11
+
+- **The family total now sits above the list.** One measured family had 145
+  subagent sessions, and a total printed after the last row was several screens
+  away - effectively absent. The Desktop tab prints `Family total` before
+  `Subagents (N)`, and the TUI `/cx` panel prints its `family total` line above
+  the columns header. The prepublish gate now fails if either row drifts below
+  the list (it reads the panel sources, where identifiers are not minified).
+- **Sums above a million print as `10.3M`,** not `10328.7k`. `fmt()` gained the
+  millions step with a `999_950` boundary, so `999_999` never renders as
+  `1000.0k`; this also keeps the TUI line inside the 60-column panel. The local
+  copy of the helper in `lib/estimate.js` (V1 free-text lines) is aligned.
+- T28g additionally pins the compact formatting and the render order, on top of
+  the sum arithmetic and the `tui-data` re-export. The harness stays at 116
+  checks.
+- **Desktop panel cosmetics.** Category rows measured at zero are hidden (a real
+  panel showed `Other 0 0%` under eight fixed rows); the full eight-row layout
+  stays when nothing is measured yet. The model header keeps the bare model id
+  and moves `provider/model` into its tooltip, and a subagent running a different
+  model than the root shows that model next to its agent name.
+- **A cleaner isolated E2E.** `test/e2e-tui.mjs` now owns every path it creates:
+  a passing run deletes `oci-e2e-*`, `oci-check-c`, the throwaway DB/state/log and
+  the TUI stamp, and a failing run keeps them and prints their paths instead of
+  leaving the tree for the next run to trip over. The unit gate cleans its own
+  `oci-prepublish-*` files and dedup markers on every run, a failing one included
+  (an `exit` handler, since `fatal()` leaves the script immediately).
+- **The isolated E2E now fails if it disturbs the live Desktop.** The PID
+  snapshot taken before and after the run used to be report-only; a difference
+  now fails the run (a manual restart or an app update during the run looks the
+  same, and the message says so). An unavailable snapshot is logged and the
+  comparison is skipped.
+- **The `/context-diff` instruction is one short clause** ("Reply with only the
+  content above."), replacing the four-clause tail that gave the model more text
+  to paraphrase back. A visible table still needs a model turn - a
+  `resume:false` notice shows only the `description` chip - so the echo risk is
+  reduced, not removed; T40 pins the tail as tag-free, single-line and short.
+
 ## 1.9.1 — 2026-11-10
 
 - **Family total row.** The TUI `/cx` panel and the Desktop context tab now print

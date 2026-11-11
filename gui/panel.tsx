@@ -33,6 +33,25 @@ const CATEGORIES = [
   ["other", "Other"],
 ] as const
 
+type Category = (typeof CATEGORIES)[number]
+
+// A category that measured zero costs a row and says nothing: a real panel
+// showed "Other 0 0%" under eight fixed rows. Zero rows are dropped, but the
+// full eight-row layout is kept when NOTHING is measured, so a freshly created
+// session does not collapse into an empty block (the caller only renders this
+// when the row exists, but every category can still be 0 while `ctx` is not).
+function visibleCategories(row: DesktopRow): ReadonlyArray<Category> {
+  const shown = CATEGORIES.filter((c) => (row[c[0]] || 0) > 0)
+  return shown.length > 0 ? shown : CATEGORIES
+}
+
+// "provider/model" for the header TOOLTIP; the visible header stays the bare
+// model id (the row has a fixed width and a long id is clipped by CSS anyway).
+function modelLabel(row: DesktopRow): string {
+  const model = row.modelID || "unknown model"
+  return row.providerID ? `${row.providerID}/${model}` : model
+}
+
 // Deterministic HH:MM:SS in LOCAL time, built from the Date getters instead of
 // toLocaleTimeString(): the latter follows the host locale (AM/PM, dotted
 // separators, seconds dropped) and made the pill/panel text differ from the TUI
@@ -150,6 +169,9 @@ const styles = {
     "white-space": "nowrap",
     opacity: "0.85",
   },
+  subModel: {
+    opacity: "0.6",
+  },
   title: {
     "font-weight": "600",
     opacity: "0.85",
@@ -248,7 +270,7 @@ export function ContextPanel(props: { session: MountedSession }) {
           {(row) => (
             <>
               <div style={styles.header}>
-                <span style={styles.model} title={row().modelID}>
+                <span style={styles.model} title={modelLabel(row())}>
                   {row().modelID || "unknown model"}
                 </span>
                 <span style={styles.total}>
@@ -260,7 +282,7 @@ export function ContextPanel(props: { session: MountedSession }) {
               </div>
 
               <div style={styles.section}>
-                <For each={CATEGORIES}>
+                <For each={visibleCategories(row())}>
                   {(category) => (
                     <div style={styles.row}>
                       <span style={styles.label}>{category[1]}</span>
@@ -294,6 +316,14 @@ export function ContextPanel(props: { session: MountedSession }) {
               </div>
 
               <Show when={children().length > 0}>
+                <div
+                  style={styles.totalRow}
+                  title="Sum of each session's own context usage (every session has its own window)"
+                >
+                  <span style={styles.label}>Family total</span>
+                  <span style={styles.value}>{fmt(familyTotal())}</span>
+                  <span style={styles.share}>{rows().length} sessions</span>
+                </div>
                 <div style={styles.title}>
                   Subagents ({children().length})
                 </div>
@@ -301,8 +331,11 @@ export function ContextPanel(props: { session: MountedSession }) {
                   <For each={children()}>
                     {(child) => (
                       <div style={styles.sub}>
-                        <span style={styles.subName} title={child.modelID}>
+                        <span style={styles.subName} title={modelLabel(child)}>
                           {child.agent || "sub"}
+                          <Show when={child.modelID && child.modelID !== (root()?.modelID ?? "")}>
+                            <span style={styles.subModel}> · {child.modelID}</span>
+                          </Show>
                         </span>
                         <span style={styles.value}>
                           {fmt(child.ctx)}
@@ -313,14 +346,6 @@ export function ContextPanel(props: { session: MountedSession }) {
                       </div>
                     )}
                   </For>
-                </div>
-                <div
-                  style={styles.totalRow}
-                  title="Sum of each session's own context usage (every session has its own window)"
-                >
-                  <span style={styles.label}>Family total</span>
-                  <span style={styles.value}>{fmt(familyTotal())}</span>
-                  <span style={styles.share}>{rows().length} sessions</span>
                 </div>
               </Show>
             </>

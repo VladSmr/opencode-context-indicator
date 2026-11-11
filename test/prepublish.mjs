@@ -34,7 +34,26 @@ const importScan = createRequire(import.meta.url)("./lib/import-scan.cjs");
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
+// Temp artifacts of THIS harness run, all under %TEMP%. Registered on `exit`
+// so a failing run (`fatal` -> process.exit) cleans up too: otherwise the dedup
+// markers and the redirected XDG root pile up exactly on the runs that fail.
+// `force: true` makes the cleanup idempotent, so the tail call is harmless.
+const TEMP_ARTIFACTS = [
+  join(tmpdir(), "oci-prepublish-state.json"),
+  join(tmpdir(), "oci-prepublish-state.json.lock"),
+  join(tmpdir(), "oci-prepublish-log.log"),
+  join(tmpdir(), "oci-prepublish-log.log.lock"),
+  join(tmpdir(), "oci-prepublish-dedup"),
+  join(tmpdir(), `oci-prepublish-xdg-${process.pid}`),
+];
+const cleanupTempArtifacts = () => {
+  for (const p of TEMP_ARTIFACTS) {
+    try { rmSync(p, { recursive: true, force: true }); } catch { /* ok */ }
+  }
+};
+
 const fatal = (msg) => { console.error(`\n[prepublish FAILED] ${msg}`); process.exit(1); };
+process.on("exit", cleanupTempArtifacts);
 const pass  = (msg) => console.log(`  ✓ ${msg}`);
 
 // ---------------------------------------------------------------------------
@@ -1597,6 +1616,10 @@ const formatMod = await import(pathToFileURL(join(repoRoot, "lib", "format.js"))
 // The TUI panel imports the helper through lib/tui-data.js, whose hand-written
 // .d.ts would keep tsc green even if the runtime re-export disappeared.
 const tuiDataMod = await import(pathToFileURL(join(repoRoot, "lib", "tui-data.js")).href);
+// lib/estimate.js keeps a local copy of fmt() for the V1 free-text lines (it
+// cannot import lib/format.js in the V1 path). Compare them on the values that
+// matter, so the two copies cannot drift apart silently.
+const estimateFmtMod = await import(pathToFileURL(join(repoRoot, "lib", "estimate.js")).href);
 check("T28g family total: sums each session's own ctx, ignores bad values", () => {
   assert(formatMod.sumCtx([{ ctx: 100 }, { ctx: 250 }]) === 350, "sums rows");
   assert(
@@ -1605,6 +1628,37 @@ check("T28g family total: sums each session's own ctx, ignores bad values", () =
   );
   assert(formatMod.sumCtx(null) === 0, "null -> 0");
   assert(tuiDataMod.sumCtx === formatMod.sumCtx, "tui-data must re-export the shared helper");
+
+  // A family can hold hundreds of sessions (145 measured once). Both surfaces
+  // must print the total ABOVE the list, otherwise it is never seen. The TUI
+  // panel is not rendered by any gate, so pin the order in its source - anchored
+  // on the real render calls, since a bare "totalLine()" also matches the
+  // comment above the tree.
+  const tuiPanelSrc = readFileSync(join(repoRoot, "lib", "tui-panel.ts"), "utf8");
+  const tuiTotalAt = tuiPanelSrc.indexOf("mutedText(() => totalLine())");
+  const tuiColsAt = tuiPanelSrc.indexOf("mutedText(() => columns())");
+  assert(tuiTotalAt > 0 && tuiColsAt > 0, "the TUI panel must render totalLine() and columns()");
+  assert(tuiTotalAt < tuiColsAt, "the TUI family total must render above the columns header");
+
+  // Big families: 10.3M must not print as "10328.7k" (unreadable and too wide).
+  assert(formatMod.fmt(940) === "940", "sub-thousand stays exact");
+  assert(formatMod.fmt(12846) === "12.8k", "thousands use k");
+  assert(formatMod.fmt(999_949) === "999.9k", "just under a million stays in k");
+  assert(formatMod.fmt(999_950) === "1.0M", "the million boundary rounds up, not to 1000.0k");
+  assert(formatMod.fmt(10_328_656) === "10.3M", "family sums use M");
+  // The k/M steps are chosen on the MAGNITUDE, so a signed value keeps its sign
+  // and still compacts: pin it, because every caller is a token count today and
+  // a silent contract flip would only surface on a negative delta.
+  assert(formatMod.fmt(-1500) === "-1.5k", "negative values keep the sign and compact");
+  assert(formatMod.fmt(999.4) === "999", "sub-thousand values are rounded");
+
+  // The V1 copy in lib/estimate.js must produce the same strings.
+  for (const v of [0, 1, 940, 999.4, 1000, 12846, 999_949, 999_950, 10_328_656, -1500, NaN]) {
+    assert(
+      estimateFmtMod.fmt(v) === formatMod.fmt(v),
+      `estimate.js fmt(${String(v)}) = ${estimateFmtMod.fmt(v)} but format.js = ${formatMod.fmt(v)}`,
+    );
+  }
 });
 
 cacheMod.breakdownCache.delete("ses_DIFF_FRESH");
@@ -2915,9 +2969,11 @@ check("T32 client-context fallback never shadows hook-measured categories", () =
       `${tag}: nothing may precede the payload`,
     );
     // The imperative must not name the tags or the body: it is the last thing the
-    // model reads, and a mention of the tags invites it to echo them.
+    // model reads, and a mention of the tags invites it to echo them. Shorter is
+    // better for the same reason - the tail is the easiest thing to paraphrase.
     assert(!/<context-|verbatim/i.test(mod.REPLY_ONLY), "instruction must stay tag-free and short");
     assert(mod.REPLY_ONLY.split("\n").length === 1, "instruction must be one line");
+    assert(mod.REPLY_ONLY.length <= 60, `instruction must stay short (${mod.REPLY_ONLY.length} chars)`);
   });
 
   check("T40 updatedAt: locale-independent HH:MM:SS", () => {
@@ -3366,19 +3422,27 @@ console.log("\n(g) Desktop GUI bundle...");
   // The needles above only prove the row exists, not what it prints. The row
   // must sum the family (sumCtx), not print the root session's own ctx, which
   // would claim a single window. Minified identifiers are renamed, so check the
-  // JSX source the bundle was built from.
+  // JSX source the bundle was built from. Anchors are the user-visible strings,
+  // not style-object keys, so renaming a style does not fail the gate.
   {
     const panelPath = join(repoRoot, "gui", "panel.tsx");
     if (!existsSync(panelPath)) {
       fatal("gui/panel.tsx is missing - the Desktop panel source is gone");
     }
     const panelSrc = readFileSync(panelPath, "utf8");
-    const rowAt = panelSrc.indexOf("styles.totalRow}");
-    if (rowAt < 0) fatal("gui/panel.tsx has no totalRow block - the family-total row is gone");
-    if (!panelSrc.slice(rowAt, rowAt + 600).includes("familyTotal(")) {
+    const rowAt = panelSrc.indexOf("Family total");
+    if (rowAt < 0) fatal("gui/panel.tsx has no Family total row - it was removed");
+    // A family can hold hundreds of sessions; a total below the last row is
+    // invisible. It must stay above the subagent list.
+    const listAt = panelSrc.indexOf("Subagents (");
+    if (listAt < 0) fatal('gui/panel.tsx has no "Subagents (" title - the subagent list is gone');
+    if (rowAt > listAt) {
+      fatal("the Family total row sits below the subagent list - it would scroll out of sight");
+    }
+    if (!panelSrc.slice(rowAt, listAt).includes("familyTotal(")) {
       fatal("the Family total row no longer prints the family total - it must not print one session's ctx");
     }
-    if (!/const familyTotal = \(\) => sumCtx\(/.test(panelSrc)) {
+    if (!/const familyTotal\s*=\s*\(\)\s*=>\s*sumCtx\(/.test(panelSrc)) {
       fatal("familyTotal() no longer sums the family (sumCtx) - printing one window's ctx would be wrong");
     }
   }
@@ -3598,10 +3662,9 @@ console.log("\n(h) Desktop GUI runtime smoke...");
 
 
 
-// Cleanup the isolated harness files only — never the live state.json/log.
-try { unlinkSync(HARNESS_STATE); } catch { /* ok */ }
-try { unlinkSync(`${HARNESS_STATE}.lock`); } catch { /* ok */ }
-try { unlinkSync(join(tmpdir(), "oci-prepublish-log.log")); } catch { /* ok */ }
-try { unlinkSync(join(tmpdir(), "oci-prepublish-log.log.lock")); } catch { /* ok */ }
+// Cleanup the isolated harness files only — never the live state.json/log. The
+// `exit` handler above runs it on a failing run too; this call keeps the
+// directories gone even if a later line of this file were to throw.
+cleanupTempArtifacts();
 
 console.log("\n[prepublish OK] All gates passed.\n");
