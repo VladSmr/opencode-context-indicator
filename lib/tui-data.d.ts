@@ -71,6 +71,27 @@ export declare function collectFamily(
 ): StateEntry[]
 export declare function fmt(n: number): string
 export declare function num(v: unknown): number
+export declare const MAX_FAMILY_ROWS: number
+export interface FamilySplit {
+  root: StateEntry | null
+  shown: StateEntry[]
+  hidden: StateEntry[]
+  hiddenCtx: number
+}
+export declare function splitFamily(
+  rows: readonly StateEntry[],
+  limit?: number,
+): FamilySplit
+export interface FamilyTail {
+  count: number
+  hiddenCtx: number
+  percent: number | null
+  text: string
+}
+export declare function familyTail(
+  hidden: readonly StateEntry[],
+  total: number,
+): FamilyTail
 export declare function sumCtx(
   rows:
     | ReadonlyArray<{ ctx?: unknown } | null | undefined>

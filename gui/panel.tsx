@@ -16,7 +16,7 @@ import { For, Show, createEffect, createMemo, createSignal, onCleanup } from "so
 import { usePlugin, type MountedSession } from "@opencode/plugin/gui"
 import { DesktopContextRpc } from "../lib/rpc.js"
 import type { DesktopFamilyResult, DesktopRow } from "../lib/rpc.js"
-import { fmt, sumCtx } from "../lib/format.js"
+import { fmt, splitFamily, familyTail, sumCtx } from "../lib/format.js"
 
 const POLL_MS = 1500
 
@@ -172,6 +172,13 @@ const styles = {
   subModel: {
     opacity: "0.6",
   },
+  subMore: {
+    display: "flex",
+    "justify-content": "space-between",
+    gap: "8px",
+    "font-size": "11px",
+    opacity: "0.5",
+  },
   title: {
     "font-weight": "600",
     opacity: "0.85",
@@ -227,14 +234,9 @@ export function ContextPanel(props: { session: MountedSession }) {
   const root = () => rows()[0]
   // Heaviest child first: a family can hold a dozen subagents and the RPC order
   // is the parentID walk order, which buries the session that is actually eating
-  // the window. `slice()` first - `rows()` is the polled snapshot and the RPC
-  // array must not be reordered in place. A memo keeps the sort out of every
-  // reactive read (the list is read four times per render pass).
-  const children = createMemo(() =>
-    rows()
-      .slice(1)
-      .sort((a, b) => (b.ctx || 0) - (a.ctx || 0)),
-  )
+  // the window. splitFamily() re-sorts children; a memo keeps the work out of
+  // every reactive read (the split is read four times per render pass).
+  const children = createMemo(() => splitFamily(rows()))
 
   const barWidth = (tokens: number) => {
     const total = root()?.ctx || 0
@@ -245,6 +247,9 @@ export function ContextPanel(props: { session: MountedSession }) {
   // Whole family: every session's own context usage added up. Labelled in the
   // UI as a sum across windows, because each subagent has its own window.
   const familyTotal = () => sumCtx(rows())
+
+  // Tail summary for the "+N more" row when some children are hidden.
+  const tail = createMemo(() => familyTail(children().hidden, familyTotal()))
 
   return (
     <div style={styles.panel}>
@@ -315,7 +320,7 @@ export function ContextPanel(props: { session: MountedSession }) {
                 </Show>
               </div>
 
-              <Show when={children().length > 0}>
+              <Show when={children().shown.length + children().hidden.length > 0}>
                 <div
                   style={styles.totalRow}
                   title="Sum of each session's own context usage (every session has its own window)"
@@ -325,10 +330,10 @@ export function ContextPanel(props: { session: MountedSession }) {
                   <span style={styles.share}>{rows().length} sessions</span>
                 </div>
                 <div style={styles.title}>
-                  Subagents ({children().length})
+                  Subagents ({children().shown.length + children().hidden.length})
                 </div>
                 <div style={styles.section}>
-                  <For each={children()}>
+                  <For each={children().shown}>
                     {(child) => (
                       <div style={styles.sub}>
                         <span style={styles.subName} title={modelLabel(child)}>
@@ -346,6 +351,15 @@ export function ContextPanel(props: { session: MountedSession }) {
                       </div>
                     )}
                   </For>
+                  <Show when={children().hidden.length > 0}>
+                    <div style={styles.subMore}>
+                      <span style={styles.subName}>+{tail().count} more</span>
+                      <span style={styles.value}>
+                        {fmt(tail().hiddenCtx)}
+                        {tail().percent === null ? "" : ` (${tail().percent}%)`}
+                      </span>
+                    </div>
+                  </Show>
                 </div>
               </Show>
             </>

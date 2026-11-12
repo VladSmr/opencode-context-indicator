@@ -10,7 +10,7 @@ import { mkdirSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { basename, join } from "node:path"
 import type { StateEntry } from "./tui-data.js"
-import { collectFamily, fit, fmt, num, panelLayout, sumCtx, toolOutEntries, updatedCell } from "./tui-data.js"
+import { collectFamily, fit, fmt, num, panelLayout, splitFamily, sumCtx, toolOutEntries, updatedCell, familyTail } from "./tui-data.js"
 import { token } from "./tui-theme.js"
 import { c as comp, h } from "./tui-h.ts"
 import {
@@ -609,6 +609,10 @@ export function BreakdownPanel(props: {
   const totalLine = (): string =>
     `family total ${fmt(sumCtx(data().rows))} across ${data().rows.length} sessions (sum of windows)`
 
+  // Hidden rows still count in the family total (sumCtx); the tail keeps the
+  // list honest by showing what the hidden rows add up to.
+  const split = () => splitFamily(data().rows)
+
   // One compact line: the main session's tool results split by tool name
   // (server-side aggregate; the per-call "largest contributors" block above is
   // the measured, client-side view).
@@ -694,10 +698,17 @@ export function BreakdownPanel(props: {
                 },
               }),
               mutedText(() => columns()),
-              data()
-                .rows.map((e, i) =>
-                  mutedText(() => row(e, i === 0)),
-                ),
+              // split() is a memo keyed on data().rows; call it once and reuse.
+              (() => {
+                const s = split()
+                return [
+                  s.root ? mutedText(() => row(s.root!, true)) : null,
+                  ...s.shown.map((e) => mutedText(() => row(e, false))),
+                  s.hidden.length === 0
+                    ? null
+                    : mutedText(() => familyTail(s.hidden, sumCtx(data().rows)).text),
+                ]
+              })(),
               comp(Show, {
                 get when() {
                   return data().rows.some((e) => e.compactStale === true)

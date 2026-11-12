@@ -4,6 +4,54 @@ Notable user-facing changes per release. Dates are commit days (UTC).
 The package also ships a dual V1/V2 plugin — see the README for the surface
 matrix; everything below concerns the V2 path unless stated otherwise.
 
+## 1.9.3 - 2026-11-12
+
+- **The family list is capped; the family total is not.** `/cx` and the Desktop
+  tab now render the **20 heaviest subagent sessions** (`MAX_FAMILY_ROWS`, one
+  shared helper in `lib/format.js` for both surfaces) and collapse the rest into
+  a single tail row, `+125 more - 8.9M (88%)`, that carries the hidden rows'
+  summed `ctx` and their share of the family. The root stays the first row and
+  never counts against the cap, and the `family total` line still sums **every**
+  row - the cap shortens the list, not the arithmetic. One measured family had
+  145 subagent sessions and filled several screens.
+- **Retention of the shared `state.json` works on families.** The old bound was
+  a blind `sort(updatedAt).slice(256)`: it cut single rows, and because the
+  `parentID` chain is the only link the readers have, a missing intermediate row
+  hid its whole subtree (a measured 146-row family had already lost 7 rows; the
+  biggest family was itself cut). The file now keeps up to **1024 entries and
+  2 MB**, evicting **whole families** freshest-first: a family is never split, an
+  older family never displaces a fresher one, and a single family larger than a
+  cap is kept whole and flagged (soft cap). Every write that drops something logs
+  `state: evicted N families (...)` with roots, row counts and reason, so the
+  loss is visible. The 7-day tombstone prune is family-aware too: a family is
+  expired only when its **newest** row is stale, so a resumed child can no longer
+  outlive its deleted parent as an orphan "root". Byte accounting counts the key
+  and separator of every row, and the writer measures the file it is about to
+  write; the row the current write just measured is pinned, so it can never be
+  evicted by its own write. The per-instance in-memory maps keep their own
+  256-entry FIFO cap - that one is RAM only. `MAX_TRACKED_SESSIONS` split into
+  `MAP_MAX_ENTRIES` and `STATE_MAX_ENTRIES`/`STATE_MAX_BYTES` (`lib/cache.js`).
+- **The V1 subagent rollup walks the whole descendant tree.** `aggregateSubagents`
+  (used by the V1 free-text log and the toast attribution) only followed direct
+  children, so grandchildren - now the normal shape of a deep family - were
+  invisible and the sequential fetch was slow. It is now a two-phase breadth-first
+  walk: discovery with a visited set (cycle-safe) bounded to **3 levels** and
+  **64 sessions** (counted at discovery, so a deep fan-out cannot exceed the cap),
+  then message fetches in waves of **4**. A failing child is isolated (logged,
+  walk continues), and a failed `children` call marks the rollup as partial
+  (`truncated.error`). The log line gains `depths=` and `truncated=` when
+  non-trivial; the toast text is unchanged.
+- Tests: **T45** (cap, heaviest-first order, hidden sum, total preserved, shared
+  `familyTail` identity and worst-case width), **T46** (a measured-size family is
+  kept or dropped whole, whole-family eviction order, byte cap on the row and on
+  the merged file, oversized soft cap, a missing parent row, a node hanging off a
+  cycle, the pinned write, a stale family pruned whole, a 1100-row write whose
+  survivors must form a closed chain, a randomized invariant test over 40
+  deterministic forests, and a 120-step merge/evict soak), **T47** (3-level
+  aggregation, depth cap, session cap, deep fan-out, the exact 64/65 boundary, a
+  diamond/shared child, cycle, failing child, reportable `children` failure, and
+  the observed 4-in-flight bound). The harness is at 137 checks.
+
 ## 1.9.2 — 2026-11-11
 
 - **The family total now sits above the list.** One measured family had 145

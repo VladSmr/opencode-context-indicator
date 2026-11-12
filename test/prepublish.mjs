@@ -7,7 +7,10 @@
  *       the opencode TUI loader bridges (keeps npm installs live, #33884)
  *   (c) resolve chain - host-bridged modules resolve, local imports exist, and
  *       none of them is a production dependency (no duplicate instance)
- *   (d) unit-harness T1-T44 for the limit/agent/state/command/Desktop-RPC fixes
+ *   (d) unit-harness T1-T47 (137 checks) for the limit/agent/state/command/
+ *       Desktop-RPC fixes, the family list cap, family-aware retention (incl. a
+ *       randomized invariant test and a 120-step merge/evict soak) and the
+ *       recursive V1 subagent walk (caps, diamond, waves, failures)
  *   (e) corporate-identifier scan (lib/, gui/, test/ and the published surface)
  *   (f) non-English scan - no non-ASCII letters (any language other than
  *       English) anywhere in the published surface or the test tree
@@ -64,8 +67,8 @@ console.log("\n(a) Tarball composition...");
 const pkgMeta = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8"));
 const declaredFiles = pkgMeta.files || [];
 // Expand any directory-wildcard entries to their expected member(s).
-// e.g. "lib/" -> every regular file under lib/; "docs/" -> every member under
-// that prefix (the README screenshot). The base published set is
+// e.g. "lib/" -> every regular file under lib/; "docs/" -> the README screenshot
+// plus the shipped host-notes doc. The base published set is
 // LICENSE, README.md, index.js, package.json, tui.ts, CHANGELOG.md (6 files);
 // the lib/ and
 // docs/ member counts are computed from the directories so module splits and
@@ -107,7 +110,8 @@ declaredFiles.forEach((f) => {
       }
       // Allowlist, not an open wildcard: docs/ ships byte-for-byte to npm, so
       // a stray draft/log/env file must fail the gate instead of riding along.
-      if (!/\.(png|jpe?g|gif|webp|svg)$/i.test(ent.name)) {
+      // Images are screenshots; `internals.md` is the shipped host-notes doc.
+      if (!/\.(png|jpe?g|gif|webp|svg)$/i.test(ent.name) && ent.name !== "internals.md") {
         fatal(`unexpected non-image file in docs/: ${ent.name}`);
       }
       fileMembers.add(`docs/${ent.name}`);
@@ -3261,8 +3265,739 @@ check("T32 client-context fallback never shadows hook-measured categories", () =
   });
 }
 
+// ---------------------------------------------------------------------------
+// T45 - family list cap (B1). A measured family held 145 subagent sessions, so
+// both surfaces rendered several screens of rows. Both now render the heaviest
+// MAX_FAMILY_ROWS children plus ONE tail line, while the pinned total row keeps
+// summing EVERY row - the cap must never skew the total it sits above.
+// ---------------------------------------------------------------------------
+{
+  const rootRow = { sessionID: "ses_T45root", ctx: 4000 };
+  // 25 children, ctx 100..2500: the heaviest five are the LAST ones in walk
+  // order, which is exactly the ordering bug the old list had.
+  const kids = Array.from({ length: 25 }, (_, i) => ({
+    sessionID: `ses_T45c${i}`,
+    ctx: (i + 1) * 100,
+  }));
+  const family = [rootRow, ...kids];
+
+  check("T45 splitFamily: heaviest children, root not counted, total preserved", () => {
+    assert(formatMod.MAX_FAMILY_ROWS === 20, `row cap drifted to ${formatMod.MAX_FAMILY_ROWS}`);
+    const split = formatMod.splitFamily(family);
+    assert(split.root === rootRow, "the root must stay the first row");
+    assert(split.shown.length === 20, `shown ${split.shown.length} != 20`);
+    assert(split.hidden.length === 5, `hidden ${split.hidden.length} != 5`);
+    assert(split.shown[0].ctx === 2500, "children must be sorted heaviest-first");
+    for (let i = 1; i < split.shown.length; i++) {
+      assert(split.shown[i - 1].ctx >= split.shown[i].ctx, "shown rows must stay sorted");
+    }
+    assert(
+      split.hidden.every((r) => r.ctx <= 600),
+      `the hidden rows are not the lightest: ${split.hidden.map((r) => r.ctx).join(",")}`,
+    );
+    // 100 + 200 + 300 + 400 + 500
+    assert(split.hiddenCtx === 1500, `hiddenCtx ${split.hiddenCtx} != 1500`);
+    assert(
+      formatMod.sumCtx(family) ===
+        formatMod.sumCtx([split.root]) + formatMod.sumCtx(split.shown) + split.hiddenCtx,
+      "the cap must not lose a row from the family total",
+    );
+    // Degenerate inputs: the panel renders whatever the state file hands it.
+    assert(formatMod.splitFamily(family, 0).shown.length === 0, "limit 0 shows no children");
+    assert(formatMod.splitFamily(family, 0).hidden.length === 25, "limit 0 hides every child");
+    assert(formatMod.splitFamily(family, 99).hidden.length === 0, "a limit above the family hides nothing");
+    assert(formatMod.splitFamily([]).root === null, "an empty family has no root");
+    assert(formatMod.splitFamily(null).shown.length === 0, "a non-array family renders nothing");
+    const solo = formatMod.splitFamily([rootRow]);
+    assert(
+      solo.root === rootRow && solo.shown.length === 0 && solo.hidden.length === 0,
+      "a family with no children must render the root alone",
+    );
+    // The TUI imports the helper through lib/tui-data.js, whose hand-written
+    // .d.ts would hide a missing runtime re-export: pin identity, not just type.
+    assert(tuiDataMod.splitFamily === formatMod.splitFamily, "tui-data must re-export splitFamily");
+    assert(tuiDataMod.MAX_FAMILY_ROWS === formatMod.MAX_FAMILY_ROWS, "tui-data must re-export the cap");
+    assert(tuiDataMod.familyTail === formatMod.familyTail, "tui-data must re-export familyTail");
+  });
+
+  check("T45 familyTail: one canonical tail for both surfaces", () => {
+    // Both surfaces print the SAME builder's output, so pin the exact string the
+    // user sees and its worst-case width: every row the shared state file may
+    // hold minus the root and the shown rows, a millions-scale sum, 100%.
+    const hidden = Array.from(
+      { length: cacheMod.STATE_MAX_ENTRIES - 1 - formatMod.MAX_FAMILY_ROWS },
+      () => ({ ctx: 1000 }),
+    );
+    const total = 1000 * hidden.length; // all rows hidden, one window each
+    const worst = formatMod.familyTail(hidden, total);
+    assert(worst.count === hidden.length, `count ${worst.count} != ${hidden.length}`);
+    assert(worst.hiddenCtx === total, `hiddenCtx ${worst.hiddenCtx} != ${total}`);
+    assert(worst.percent === 100, `percent ${worst.percent} != 100`);
+    assert(
+      worst.text.startsWith(`+${hidden.length} more - `),
+      `tail must start with the count: "${worst.text}"`,
+    );
+    assert(worst.text.endsWith(" (100%)"), `tail must end with the share: "${worst.text}"`);
+    assert(worst.text.length <= 60, `the tail is ${worst.text.length} columns at the default 60: "${worst.text}"`);
+    // The tail of the real split above keeps the hidden sum and the family share.
+    const split = formatMod.splitFamily(family);
+    const tail = formatMod.familyTail(split.hidden, formatMod.sumCtx(family));
+    assert(tail.count === 5 && tail.hiddenCtx === 1500, `real tail ${JSON.stringify(tail)}`);
+    assert(tail.text === `+5 more - ${formatMod.fmt(1500)} (${tail.percent}%)`, `real tail text "${tail.text}"`);
+    // No usable denominator -> no "(NaN%)" and no fake "0%".
+    const noTotal = formatMod.familyTail([{ ctx: 200 }, { ctx: 100 }], 0);
+    assert(noTotal.percent === null, `percent ${noTotal.percent} for a zero total`);
+    assert(!noTotal.text.includes("%"), `a zero total must not print a share: "${noTotal.text}"`);
+    assert(formatMod.familyTail([], 0).text === "+0 more - 0", "an empty tail still reads cleanly");
+  });
+}
+
+// ---------------------------------------------------------------------------
+// T46 - state.json retention (B2). The old blind `sort(updatedAt).slice(256)`
+// cut SINGLE rows, and a missing intermediate row hides its whole subtree from
+// the parentID walk, while a missing root drops the family from /cx and the
+// Desktop panel. Retention is now family-aware: whole families, freshest first,
+// bounded by rows (1024) and bytes (2 MB).
+// ---------------------------------------------------------------------------
+{
+  const stateMod = await import(pathToFileURL(join(repoRoot, "lib", "state.js")).href);
+  // Timestamps are relative to now: the writer prunes entries untouched for
+  // PRUNE_AFTER_MS (7 days) before it evicts anything, so a fixed calendar date
+  // would make the integration seed vanish for the wrong reason.
+  const nowMs = Date.now();
+  const iso = (offsetSec) => new Date(nowMs + offsetSec * 1000).toISOString();
+  // A chain family: row 0 is the root, every other row points at its predecessor
+  // (the shape a deep subagent tree writes).
+  const mkChain = (rootId, n, baseSec) => {
+    const out = {};
+    for (let i = 0; i < n; i++) {
+      const id = `${rootId}_${i}`;
+      out[id] = {
+        sessionID: id,
+        parentID: i === 0 ? null : `${rootId}_${i - 1}`,
+        updatedAt: iso(baseSec + i),
+        ctx: 100 + i,
+      };
+    }
+    return out;
+  };
+  const bytesOf = (entry) => Buffer.byteLength(JSON.stringify(entry), "utf8");
+  // Bytes a family occupies in the serialised file, on the implementation's
+  // basis: `"<id>":<entry>,` per row (key, colon, entry, comma). Summing entries
+  // only - the first version of this test - is exactly the under-count the byte
+  // cap had, so the test must not use it. The two outer braces belong to the
+  // file, not to a family: the writer passes `Buffer.byteLength(rawText)` which
+  // includes them, and `selectStateSurvivors` compares family sums against that.
+  const familyBytes = (fam) =>
+    Object.keys(fam).reduce(
+      (n, id) => n + Buffer.byteLength(JSON.stringify(id), "utf8") + 1 + bytesOf(fam[id]) + 1,
+      0,
+    );
+
+  check("T46 selectStateSurvivors: a measured-size family is kept or dropped whole", () => {
+    // Two 146-row families = 292 rows. The 1.9.x 256-row slice silently deleted
+    // rows from the MIDDLE of one of them.
+    const all = { ...mkChain("ses_T46a", 146, 0), ...mkChain("ses_T46b", 146, 10_000) };
+    // Under the real caps nothing is evicted (and this is the fast path).
+    const kept = stateMod.selectStateSurvivors(all);
+    assert(kept.keep.size === 292, `kept ${kept.keep.size} of 292 rows`);
+    assert(kept.dropped.length === 0, `dropped ${JSON.stringify(kept.dropped)}`);
+    assert(kept.oversized === null, "nothing is oversized here");
+    // Force the GROUPING path (a row cap the pair cannot satisfy): the freshest
+    // family must survive all 146 rows and the older one must go as a unit - a
+    // per-row slice would keep 200 mixed rows instead.
+    const capped = stateMod.selectStateSurvivors(all, { maxEntries: 200, maxBytes: 1e9 });
+    assert(capped.keep.size === 146, `grouped cap kept ${capped.keep.size} rows, expected 146`);
+    assert(
+      [...capped.keep].every((id) => id.startsWith("ses_T46b_")),
+      "the freshest family must be the survivor",
+    );
+    assert(
+      capped.dropped.length === 1 && capped.dropped[0].rows === 146 && capped.dropped[0].reason === "rows",
+      `bad grouped drop ${JSON.stringify(capped.dropped)}`,
+    );
+  });
+
+  check("T46 selectStateSurvivors: eviction takes whole families, freshest first", () => {
+    const all = { ...mkChain("ses_T46c", 3, 0), ...mkChain("ses_T46d", 3, 5_000), ...mkChain("ses_T46e", 3, 9_000) };
+    const kept = stateMod.selectStateSurvivors(all, { maxEntries: 4, maxBytes: 1e9 });
+    const keptIds = [...kept.keep].sort();
+    assert(
+      keptIds.join(",") === ["ses_T46e_0", "ses_T46e_1", "ses_T46e_2"].join(","),
+      `the freshest family must be kept whole, got ${keptIds.join(",")}`,
+    );
+    // Never split: an older family is dropped as a unit, and the walk never
+    // resumes later (an older family cannot replace a fresher one).
+    assert(kept.dropped.length === 2, `dropped ${kept.dropped.length} families, expected 2`);
+    for (const d of kept.dropped) {
+      assert(d.rows === 3 && d.reason === "rows", `bad drop record ${JSON.stringify(d)}`);
+    }
+  });
+
+  check("T46 selectStateSurvivors: byte cap and the oversized single family", () => {
+    const famA = mkChain("ses_T46f", 3, 9_000); // freshest
+    const famB = mkChain("ses_T46g", 3, 0);
+    const bytesA = familyBytes(famA);
+    const all = { ...famA, ...famB };
+    // A fits exactly, B does not: B is dropped for BYTES, A is not oversized.
+    const exact = stateMod.selectStateSurvivors(all, { maxEntries: 1024, maxBytes: bytesA });
+    assert(exact.keep.size === 3, `kept ${exact.keep.size} rows under the byte cap`);
+    assert(exact.keptBytes === bytesA, `keptBytes ${exact.keptBytes} != ${bytesA}`);
+    assert(exact.oversized === null, "a family that fits must not be flagged oversized");
+    assert(
+      exact.dropped.length === 1 && exact.dropped[0].reason === "bytes" && exact.dropped[0].root === "ses_T46g_0",
+      `bad byte drop ${JSON.stringify(exact.dropped)}`,
+    );
+    // A alone is larger than the cap: kept WHOLE anyway (soft cap - a split
+    // family is worse than a large file) and flagged, so the write can log it.
+    const over = stateMod.selectStateSurvivors(all, { maxEntries: 1024, maxBytes: bytesA - 1 });
+    assert(over.keep.size === 3, "the freshest family must be kept even when oversized");
+    assert(over.oversized?.root === "ses_T46f_0", `oversized ${JSON.stringify(over.oversized)}`);
+    assert(over.dropped.every((d) => d.reason === "bytes"), "the rest is dropped for bytes");
+    // The cap is a FAMILY budget, not a row budget: 3 real rows cost more than
+    // their entry JSON (keys + separators), so a cap equal to the entries-only
+    // sum must drop A as oversized. This is the regression the under-count hid.
+    const entriesOnly = Object.values(famA).reduce((n, e) => n + bytesOf(e), 0);
+    const under = stateMod.selectStateSurvivors(all, { maxEntries: 1024, maxBytes: entriesOnly });
+    assert(
+      under.keep.size === 3 && under.oversized?.root === "ses_T46f_0",
+      `an entries-only cap must not fit the family: ${JSON.stringify(under.oversized)}`,
+    );
+  });
+
+  check("T46 selectStateSurvivors: a missing parent row is not an orphan split", () => {
+    // state.json is shared and pruned independently: a family whose root row is
+    // gone must still be grouped by its topmost EXISTING row, or the surviving
+    // rows look like unrelated roots and the cap can split them.
+    const all = {
+      ses_T46p_child: { parentID: "ses_T46p_gone", updatedAt: iso(9_000), ctx: 10 },
+      ses_T46p_grand: { parentID: "ses_T46p_child", updatedAt: iso(9_002), ctx: 20 },
+      // Fresher than the CHILD (but older than the grandchild): a per-row slice
+      // would keep {grand, q_0} and orphan the child, so this fixture tells the
+      // family walk apart from the old row-at-a-time behaviour.
+      ses_T46q_0: { parentID: null, updatedAt: iso(9_001), ctx: 30 },
+    };
+    const kept = stateMod.selectStateSurvivors(all, { maxEntries: 2, maxBytes: 1e9 });
+    assert(
+      [...kept.keep].sort().join(",") === "ses_T46p_child,ses_T46p_grand",
+      `a family with a missing root must stay whole, got ${[...kept.keep].join(",")}`,
+    );
+    // The drop record names the topmost existing row, not the missing id.
+    assert(
+      kept.dropped.length === 1 && kept.dropped[0].root === "ses_T46q_0",
+      `bad drop ${JSON.stringify(kept.dropped)}`,
+    );
+    // A missing-root chain is still ONE family when it fits: nothing is dropped.
+    const fits = stateMod.selectStateSurvivors(all, { maxEntries: 1024, maxBytes: 1e9 });
+    assert(fits.keep.size === 3 && fits.dropped.length === 0, "nothing fits-to-drop here");
+  });
+
+  check("T46 selectStateSurvivors: a node hanging off a cycle shares its family", () => {
+    // A cycle has no root; the canonical member must be taken from the CYCLE, not
+    // from the whole ancestor chain. Otherwise a node that merely points INTO the
+    // cycle (and sorts before its members) becomes its own "root": the cap can
+    // then drop the cycle family and keep that node, leaving a dangling parentID.
+    const all = {
+      ses_T46cyc_0leaf: { parentID: "ses_T46cyc_a", updatedAt: iso(9_000) },
+      ses_T46cyc_a: { parentID: "ses_T46cyc_b", updatedAt: iso(0) },
+      ses_T46cyc_b: { parentID: "ses_T46cyc_a", updatedAt: iso(0) },
+    };
+    const kept = stateMod.selectStateSurvivors(all, { maxEntries: 2, maxBytes: 1e9 });
+    assert(
+      kept.keep.size === 3 && kept.dropped.length === 0,
+      `cycle + hanging node must be one family, kept ${[...kept.keep].join(",")} dropped ${JSON.stringify(kept.dropped)}`,
+    );
+    assert(kept.oversized?.rows === 3, "the single family is kept whole past the row cap");
+  });
+
+  check("T46 selectStateSurvivors: the row being written is pinned", () => {
+    // state.json is user-writable: a row stamped in the future outranks `now` in
+    // the freshness order. The writer must still persist the measurement it just
+    // took, or it reports success while dropping its own row.
+    const all = {
+      ses_T46pin_future: { parentID: null, updatedAt: iso(86_400) },
+      ses_T46pin_live: { parentID: null, updatedAt: iso(0) },
+    };
+    const noPin = stateMod.selectStateSurvivors(all, { maxEntries: 1, maxBytes: 1e9 });
+    assert(
+      noPin.keep.has("ses_T46pin_future") && !noPin.keep.has("ses_T46pin_live"),
+      "without a pin the future row wins the single slot",
+    );
+    const pin = stateMod.selectStateSurvivors(all, {
+      maxEntries: 1,
+      maxBytes: 1e9,
+      pinned: "ses_T46pin_live",
+    });
+    assert(
+      pin.keep.has("ses_T46pin_live") && !pin.keep.has("ses_T46pin_future"),
+      `the pinned row must survive: kept ${[...pin.keep].join(",")}`,
+    );
+  });
+
+  check("T46 writer: a stale family is pruned whole, not row by row", () => {
+    // The tombstone prune used to delete rows by their own updatedAt, so a stale
+    // parent with one resumed (fresh) child was deleted while the child survived
+    // as a fake root - the same orphan the cap eviction must never create. A
+    // family goes only when its NEWEST row is stale, and then all of it goes.
+    const stale = mkChain("ses_T46stale", 3, -(10 * 24 * 3600)); // 10 days old
+    const resumed = mkChain("ses_T46mix", 2, -(9 * 24 * 3600));
+    resumed["ses_T46mix_1"].updatedAt = iso(60); // the child was resumed: fresh
+    const seed = { ...stale, ...resumed };
+    writeFileSync(HARNESS_STATE, JSON.stringify(seed), "utf8");
+    const errs = quietErr(() => {
+      mod.writeStateFile("ses_T46prune", "model-alpha", "test-provider", 100, 100, 0);
+    });
+    const after = JSON.parse(readFileSync(HARNESS_STATE, "utf8"));
+    assert(
+      ["ses_T46stale_0", "ses_T46stale_1", "ses_T46stale_2"].every((id) => !(id in after)),
+      "the stale family must be pruned as a unit",
+    );
+    assert(
+      "ses_T46mix_0" in after && "ses_T46mix_1" in after,
+      "a family with one fresh row must survive the prune whole",
+    );
+    assert("ses_T46prune" in after, "the live row must be persisted");
+    // Pruning is a silent operation by design (it is expiry, not eviction), but
+    // it must never delete a row of a family that is still alive.
+    assert(errs.every((l) => !l.includes("evicted")), `unexpected eviction: ${errs.join(" | ")}`);
+  });
+
+  check("T46 writer: the byte cap is enforced on the merged file", () => {
+    // Three families, each ~0.8 MB of padding: the row cap is far away (6 rows),
+    // but the file is over STATE_MAX_BYTES (2 MB), so the writer must evict on
+    // BYTES - and it must measure the file it is about to write (raw text + the
+    // row being written), not the entries alone.
+    const pad = "x".repeat(400_000);
+    const famOld = mkChain("ses_T46bOld", 2, -10_800);
+    const famMid = mkChain("ses_T46bMid", 2, -7_200);
+    const famNew = mkChain("ses_T46bNew", 2, -3_600);
+    for (const row of [...Object.values(famOld), ...Object.values(famMid), ...Object.values(famNew)]) {
+      row.pad = pad;
+    }
+    const seed = { ...famOld, ...famMid, ...famNew };
+    writeFileSync(HARNESS_STATE, JSON.stringify(seed), "utf8");
+    const errs = quietErr(() => {
+      mod.writeStateFile("ses_T46bWrite", "model-alpha", "test-provider", 100, 100, 0);
+    });
+    const after = JSON.parse(readFileSync(HARNESS_STATE, "utf8"));
+    assert("ses_T46bWrite" in after, "the live row must be persisted");
+    assert(
+      Object.keys(famNew).every((id) => id in after) && Object.keys(famMid).every((id) => id in after),
+      "the two freshest families must survive whole",
+    );
+    assert(
+      Object.keys(famOld).every((id) => !(id in after)),
+      "the oldest family must be evicted as a unit under the byte cap",
+    );
+    assert(
+      errs.some((l) => l.includes("evicted 1 family") && l.includes(", bytes)")),
+      `the eviction must be logged with its reason, got: ${errs.join(" | ")}`,
+    );
+  });
+
+  check("T46 selectStateSurvivors: a parentID cycle terminates and stays whole", () => {
+    // state.json is user-writable: a cycle must not hang the write.
+    const all = {
+      cyc_a: { parentID: "cyc_b", updatedAt: iso(9_000) },
+      cyc_b: { parentID: "cyc_a", updatedAt: iso(9_000) },
+      old_root: { parentID: null, updatedAt: iso(0) },
+    };
+    const kept = stateMod.selectStateSurvivors(all, { maxEntries: 2, maxBytes: 1e9 });
+    assert(
+      [...kept.keep].sort().join(",") === "cyc_a,cyc_b",
+      `a cycle must be kept as one group, got ${[...kept.keep].join(",")}`,
+    );
+    assert(kept.dropped.length === 1 && kept.dropped[0].root === "old_root", "the older row must go");
+  });
+
+  check("T46 writer: a >cap seed is trimmed without orphaning a subtree", () => {
+    // 1100 seeded rows in two 550-row families, then one live write: the file is
+    // over the row cap, so the oldest family must be evicted ENTIRELY and the
+    // survivors must still form a closed parentID chain.
+    const seed = { ...mkChain("ses_T46old", 550, -7200), ...mkChain("ses_T46new", 550, -3600) };
+    writeFileSync(HARNESS_STATE, JSON.stringify(seed), "utf8");
+    let wrote = null;
+    const errs = quietErr(() => {
+      wrote = mod.writeStateFile("ses_T46write", "model-alpha", "test-provider", 100, 100, 0);
+    });
+    assert(wrote === true, "the write must succeed");
+    assert(
+      errs.some((l) => l.includes("evicted 1 family")),
+      `the eviction must be logged, got: ${errs.join(" | ")}`,
+    );
+    const after = JSON.parse(readFileSync(HARNESS_STATE, "utf8"));
+    const ids = Object.keys(after);
+    assert(ids.length === 551, `kept ${ids.length} rows, expected 1 live + 550 newest`);
+    assert("ses_T46write" in after, "the live row must be persisted");
+    assert(
+      Object.keys(seed)
+        .filter((k) => k.startsWith("ses_T46new"))
+        .every((k) => k in after),
+      "the freshest family must survive whole",
+    );
+    assert(
+      Object.keys(seed)
+        .filter((k) => k.startsWith("ses_T46old"))
+        .every((k) => !(k in after)),
+      "the evicted family must be gone as a whole, not row by row",
+    );
+    const present = new Set(ids);
+    for (const [id, entry] of Object.entries(after)) {
+      if (entry?.parentID != null) {
+        assert(present.has(entry.parentID), `orphan ${id}: parent ${entry.parentID} was evicted`);
+      }
+    }
+  });
+
+  check("T46 selectStateSurvivors: random forests never split a family", () => {
+    // Property test over 40 deterministic random forests (seeded LCG, so a
+    // failure is reproducible). The contract under test is the invariant, not
+    // one hand-picked shape: a row and its existing parent are either both kept
+    // or both dropped, and more than one family survives only while the row cap
+    // holds. This is what "never split" means for every reader of the file.
+    let seed = 0x2f6e2b1;
+    const rnd = () => {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      return seed / 0x7fffffff;
+    };
+    const rootOf = (all, id) => {
+      const seen = new Set();
+      let cur = id;
+      while (!seen.has(cur)) {
+        seen.add(cur);
+        const parent = all[cur]?.parentID;
+        if (typeof parent !== "string" || !Object.prototype.hasOwnProperty.call(all, parent)) {
+          return cur;
+        }
+        cur = parent;
+      }
+      return [...seen].sort()[0]; // cycle: same canonical rule as the walk
+    };
+    for (let round = 0; round < 40; round++) {
+      let all = {};
+      const familyCount = 1 + Math.floor(rnd() * 5);
+      for (let f = 0; f < familyCount; f++) {
+        const size = 1 + Math.floor(rnd() * 10);
+        let prev = null;
+        for (let i = 0; i < size; i++) {
+          const id = `pr${round}_${f}_${i}`;
+          all[id] = { parentID: prev, updatedAt: iso(Math.floor(rnd() * 1e6)), ctx: 1 + i };
+          prev = id;
+        }
+      }
+      // Drop some parents from the input: the topmost existing row becomes a root
+      // (a family can be split by an INDEPENDENT prune, and grouping must cope).
+      for (const [id, entry] of Object.entries(all)) {
+        if (entry.parentID != null && rnd() < 0.2) delete all[entry.parentID];
+      }
+      const total = Object.keys(all).length;
+      const cap = 1 + Math.floor(rnd() * total);
+      const kept = stateMod.selectStateSurvivors(all, { maxEntries: cap, maxBytes: 1e9 });
+
+      // 1. Partition: every row is kept or reported as dropped, none vanishes.
+      for (const id of Object.keys(all)) {
+        const inKeep = kept.keep.has(id);
+        const inDrop = kept.dropped.some((d) => d.root === rootOf(all, id));
+        assert(inKeep || inDrop, `round ${round}: ${id} is neither kept nor in a dropped family`);
+      }
+      // 2. Parent closure: a kept row never loses a parent that still exists.
+      for (const [id, entry] of Object.entries(all)) {
+        if (entry.parentID == null) continue;
+        if (!Object.prototype.hasOwnProperty.call(all, entry.parentID)) continue;
+        assert(
+          kept.keep.has(id) === kept.keep.has(entry.parentID),
+          `round ${round}: ${id} and its parent ${entry.parentID} were split`,
+        );
+      }
+      // 3. Caps: over the row cap only a single family may survive (soft cap).
+      if (kept.keep.size > cap) {
+        const roots = new Set([...kept.keep].map((id) => rootOf(all, id)));
+        assert(roots.size === 1, `round ${round}: ${roots.size} families survived a cap of ${cap}`);
+      }
+    }
+  });
+
+  check("T46 writer: 120 merge/evict cycles never orphan a kept row", () => {
+    // Soak the actual decision loop, not one snapshot: six families grow a row at
+    // a time while a small cap keeps evicting. At EVERY step the survivors must
+    // still be closed families and the freshly measured row must be present.
+    // A family whose rows were all evicted is re-rooted by the next write (the
+    // real host can resume a child of a row the cap already dropped), so the
+    // invariant is: a kept row never loses a parent that IS in the file.
+    const CAP = 40;
+    let all = {};
+    for (let f = 0; f < 6; f++) {
+      const root = `soak${f}_0`;
+      all[root] = { sessionID: root, parentID: null, updatedAt: iso(0), ctx: 1 };
+    }
+    const newestIn = (map, f) => {
+      let best = null;
+      let bestTs = "";
+      for (const [id, e] of Object.entries(map)) {
+        if (!id.startsWith(`soak${f}_`)) continue;
+        const ts = String(e.updatedAt || "");
+        if (ts > bestTs) {
+          bestTs = ts;
+          best = id;
+        }
+      }
+      return best;
+    };
+    for (let step = 1; step <= 120; step++) {
+      const f = step % 6;
+      const id = `soak${f}_${step}`;
+      all[id] = { sessionID: id, parentID: newestIn(all, f), updatedAt: iso(step), ctx: 1 };
+      const kept = stateMod.selectStateSurvivors(all, { maxEntries: CAP, maxBytes: 1e9 });
+      assert(kept.keep.has(id), `step ${step}: the row just written was evicted`);
+      const survivors = {};
+      for (const sid of kept.keep) survivors[sid] = all[sid];
+      for (const [sid, entry] of Object.entries(survivors)) {
+        if (entry.parentID == null) continue;
+        assert(
+          survivors[entry.parentID] !== undefined,
+          `step ${step}: kept row ${sid} lost its parent ${entry.parentID}`,
+        );
+      }
+      assert(
+        kept.keep.size <= CAP || new Set([...kept.keep].map((sid) => sid.split("_")[0])).size === 1,
+        `step ${step}: ${kept.keep.size} rows over a cap of ${CAP}`,
+      );
+      all = survivors;
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// T47 - recursive V1 subagent rollup (B3). `aggregateSubagents` only followed
+// DIRECT children, so a grandchild - now the normal shape of a deep family -
+// was invisible, and the sequential fetch grew with the family. It is now a
+// bounded breadth-first walk; the caps and the cycle guard are what keep a
+// user-writable/host-driven tree from fanning out RPCs forever.
+// ---------------------------------------------------------------------------
+{
+  const v1Mod = await import(pathToFileURL(join(repoRoot, "lib", "v1.js")).href);
+  const assistant = (input) => ({
+    info: {
+      role: "assistant",
+      modelID: "model-alpha",
+      providerID: "test-provider",
+      tokens: { input, output: 10, reasoning: 5 },
+    },
+  });
+  // Minimal stand-in for the V1 client: only the two calls the walk makes.
+  // `delayMs` makes `messages` settle asynchronously so a sequential loop and a
+  // wave loop can be told apart by the observed in-flight count.
+  const mkClient = (tree, opts = {}) => {
+    const calls = { children: 0, messages: 0 };
+    const flight = { inFlight: 0, maxInFlight: 0 };
+    return {
+      calls,
+      flight,
+      session: {
+        children: async ({ path: { id } }) => {
+          calls.children++;
+          if (opts.failChildren?.has(id)) throw new Error(`children ${id}`);
+          return (tree[id] || []).map((child) => ({ id: child }));
+        },
+        messages: async ({ path: { id } }) => {
+          calls.messages++;
+          flight.inFlight++;
+          flight.maxInFlight = Math.max(flight.maxInFlight, flight.inFlight);
+          try {
+            if (opts.delayMs) await new Promise((resolve) => setTimeout(resolve, opts.delayMs));
+            if (opts.failMessages?.has(id)) throw new Error(`messages ${id}`);
+            return [assistant(1000)];
+          } finally {
+            flight.inFlight--;
+          }
+        },
+      },
+    };
+  };
+
+  // (a) 3-level tree: root -> a,b -> c -> d.
+  const treeA = { ses_T47rootA: ["ses_T47a", "ses_T47b"], ses_T47a: ["ses_T47c"], ses_T47c: ["ses_T47d"] };
+  const clientA = mkClient(treeA);
+  const resA = await v1Mod.aggregateSubagents(clientA, "ses_T47rootA");
+
+  check("T47 aggregateSubagents: walks grandchildren, per-child depth", () => {
+    assert(resA.count === 4, `visited ${resA.count} sessions, expected 4 (a, b, c, d)`);
+    assert(
+      resA.input === 4000 && resA.output === 40 && resA.reasoning === 20,
+      `aggregates must sum every visited session: in=${resA.input} out=${resA.output} r=${resA.reasoning}`,
+    );
+    assert(
+      JSON.stringify(resA.levels) === JSON.stringify([2, 1, 1]),
+      `levels ${JSON.stringify(resA.levels)} != [2,1,1]`,
+    );
+    const byId = new Map(resA.perChild.map((c) => [c.id, c]));
+    assert(byId.get("ses_T47a")?.depth === 1, "a direct child is depth 1");
+    assert(byId.get("ses_T47c")?.depth === 2, "a grandchild is depth 2");
+    assert(byId.get("ses_T47d")?.depth === 3, "a great-grandchild is depth 3");
+    // Every child, deep or not, reports the SAME per-child fill formula (the
+    // last assistant message's overflow count), not a depth-dependent one.
+    const fillOf = (id) => byId.get(id)?.input;
+    assert(fillOf("ses_T47d") > 0, `a deep child reported no fill: ${fillOf("ses_T47d")}`);
+    assert(
+      fillOf("ses_T47d") === fillOf("ses_T47a"),
+      `per-child fill differs by depth: ${fillOf("ses_T47d")} vs ${fillOf("ses_T47a")}`,
+    );
+    assert(clientA.calls.messages === 4, `fetched ${clientA.calls.messages} message lists, expected 4`);
+    assert(resA.truncated?.depth === false, "a 3-level tree is not truncated");
+  });
+
+  // (b) depth cap: a 5-level chain must stop at depth 3.
+  const chain = { ses_T47rootB: ["ses_T47n1"], ses_T47n1: ["ses_T47n2"], ses_T47n2: ["ses_T47n3"], ses_T47n3: ["ses_T47n4"], ses_T47n4: ["ses_T47n5"] };
+  const resB = await v1Mod.aggregateSubagents(mkClient(chain), "ses_T47rootB");
+
+  // (c) session cap: 80 children, at most 64 sessions.
+  const wide = { ses_T47rootC: Array.from({ length: 80 }, (_, i) => `ses_T47w${i}`) };
+  const resC = await v1Mod.aggregateSubagents(mkClient(wide), "ses_T47rootC");
+
+  // (c2) the cap counts PROCESSED + QUEUED sessions. A cap that looked only at
+  // the queue let a deep fan-out enqueue one session per processed node, so the
+  // walk still visited the whole tree; a two-level fan-out is the discriminator.
+  const deepWide = {
+    ses_T47rootC2: ["ses_T47dwA"],
+    ses_T47dwA: Array.from({ length: 70 }, (_, i) => `ses_T47dw${i}`),
+  };
+  const resC2 = await v1Mod.aggregateSubagents(mkClient(deepWide), "ses_T47rootC2");
+
+  check("T47 aggregateSubagents: depth and session caps are reported", () => {
+    assert(resB.count === 3, `depth cap: visited ${resB.count}, expected 3`);
+    assert(resB.truncated?.depth === true, "a 5-level chain must report truncation");
+    assert(resC.count === 64, `session cap: visited ${resC.count}, expected 64`);
+    assert(resC.truncated?.count === true, "80 children must report the session cap");
+    assert(resC.truncated?.dropped === 16, `dropped ${resC.truncated?.dropped}, expected 16`);
+    // The walk must not fetch messages for sessions it did not take.
+    assert(resC.perChild.length === 64, `perChild holds ${resC.perChild.length} rows, expected 64`);
+    // Two levels: A (depth 1) + 63 grandchildren = the cap, not 1 + 70.
+    assert(resC2.count === 64, `deep fan-out visited ${resC2.count}, expected 64`);
+    assert(resC2.truncated?.count === true, "a deep fan-out above the cap must report truncation");
+    assert(resC2.truncated?.dropped === 7, `deep fan-out dropped ${resC2.truncated?.dropped}, expected 7`);
+    assert(
+      JSON.stringify(resC2.levels) === JSON.stringify([1, 63, 0]),
+      `deep fan-out levels ${JSON.stringify(resC2.levels)} != [1,63,0]`,
+    );
+  });
+
+  // (d) cycle: a child that points back at an already visited session.
+  const cycle = { ses_T47rootD: ["ses_T47x"], ses_T47x: ["ses_T47rootD", "ses_T47y"], ses_T47y: [] };
+  const resD = await v1Mod.aggregateSubagents(mkClient(cycle), "ses_T47rootD");
+
+  // (e) one failing child must not abort the walk.
+  const treeE = { ses_T47rootE: ["ses_T47bad", "ses_T47good"], ses_T47good: ["ses_T47deep"] };
+  const resE = await v1Mod.aggregateSubagents(
+    mkClient(treeE, { failMessages: new Set(["ses_T47bad"]) }),
+    "ses_T47rootE",
+  );
+
+  // (f) a children() failure at an intermediate level hides everything below it.
+  // The rollup is then PARTIAL and must say so; silently reporting a smaller
+  // family is the exact failure mode this release fixes.
+  const treeF = { ses_T47rootF: ["ses_T47f1"], ses_T47f1: ["ses_T47f2"], ses_T47f2: [] };
+  const resF = await v1Mod.aggregateSubagents(
+    mkClient(treeF, { failChildren: new Set(["ses_T47f1"]) }),
+    "ses_T47rootF",
+  );
+
+  // (g) bounded concurrency: 12 children, 5 ms per messages call. A sequential
+  // loop never has more than one call in flight; the wave implementation has to
+  // reach the documented bound (4) and must never exceed it.
+  const wideG = { ses_T47rootG: Array.from({ length: 12 }, (_, i) => `ses_T47g${i}`) };
+  const clientG = mkClient(wideG, { delayMs: 5 });
+  const resG = await v1Mod.aggregateSubagents(clientG, "ses_T47rootG");
+
+  // (h) diamond: two parents share one child. The child must be visited and
+  // counted once, and its tokens must not double-count through both parents.
+  const diamond = {
+    ses_T47rootH: ["ses_T47hA", "ses_T47hB"],
+    ses_T47hA: ["ses_T47hC"],
+    ses_T47hB: ["ses_T47hC"],
+    ses_T47hC: [],
+  };
+  const clientH = mkClient(diamond);
+  const resH = await v1Mod.aggregateSubagents(clientH, "ses_T47rootH");
+
+  // (i) exact cap boundary: 64 children fit, the 65th must be dropped. A cap
+  // that is off by one passes every "wide" test but silently loses a session.
+  const atCap = { ses_T47rootI: Array.from({ length: 64 }, (_, i) => `ses_T47i${i}`) };
+  const resI = await v1Mod.aggregateSubagents(mkClient(atCap), "ses_T47rootI");
+  const overCap = { ses_T47rootJ: Array.from({ length: 65 }, (_, i) => `ses_T47j${i}`) };
+  const resJ = await v1Mod.aggregateSubagents(mkClient(overCap), "ses_T47rootJ");
+
+  check("T47 aggregateSubagents: cycle-safe, one failing child does not abort", () => {
+    assert(resD.count === 2, `cycle: visited ${resD.count}, expected 2 (x, y)`);
+    assert(
+      resD.perChild.filter((c) => c.id === "ses_T47rootD").length === 0,
+      "the root must never be reported as its own subagent",
+    );
+    assert(resE.count === 3, `failure: visited ${resE.count}, expected 3`);
+    assert(
+      resE.perChild.some((c) => c.id === "ses_T47deep"),
+      "a grandchild of a healthy sibling must still be aggregated",
+    );
+    assert(
+      !resE.perChild.some((c) => c.id === "ses_T47bad"),
+      "a child whose messages failed has no measurements to report",
+    );
+    assert(resE.input === 2000, `failed child must contribute nothing: in=${resE.input}`);
+  });
+
+  check("T47 aggregateSubagents: a children() failure is reported, not hidden", () => {
+    // Only f1 is visible; f2 is unreachable because f1.children threw. The
+    // rollup is partial, and the toast/log must be able to say so.
+    assert(resF.count === 1, `children failure: visited ${resF.count}, expected 1`);
+    assert(resF.truncated?.error === true, "a children() failure must set truncated.error");
+    assert(resF.truncated?.depth === false && resF.truncated?.count === false, "no cap was hit here");
+    assert(resF.perChild.length === 1, "the reachable child is still measured");
+    // The flag is part of the result shape on EVERY path (the log reads it).
+    assert(resA.truncated?.error === false, "the flag must be present and false on a healthy tree");
+  });
+
+  check("T47 aggregateSubagents: message fetches run in bounded waves", () => {
+    assert(resG.count === 12, `concurrency tree visited ${resG.count}, expected 12`);
+    assert(clientG.calls.messages === 12, `fetched ${clientG.calls.messages} message lists, expected 12`);
+    // SUBAGENT_CONCURRENCY is 4: reached (a sequential loop peaks at 1) and not
+    // exceeded (an unbounded Promise.all over 12 would peak at 12).
+    assert(clientG.flight.maxInFlight === 4, `max in flight ${clientG.flight.maxInFlight}, expected 4`);
+    assert(resG.input === 12000, `waves must not lose a record: in=${resG.input}`);
+  });
+
+  check("T47 aggregateSubagents: a diamond counts the shared child once", () => {
+    // A and B both report C as a child (a resumed branch, or two parents in the
+    // host data). A walk without a visited set double-counts C's tokens and
+    // reports it twice in perChild, inflating both the total and the family list.
+    assert(resH.count === 3, `diamond visited ${resH.count}, expected 3 (A, B, C)`);
+    assert(resH.input === 3000, `diamond must sum each session once: in=${resH.input}`);
+    const ids = resH.perChild.map((c) => c.id).sort();
+    assert(
+      ids.join(",") === "ses_T47hA,ses_T47hB,ses_T47hC",
+      `diamond perChild ${ids.join(",")}`,
+    );
+    assert(clientH.calls.messages === 3, `diamond fetched ${clientH.calls.messages} message lists, expected 3`);
+    assert(
+      JSON.stringify(resH.levels) === JSON.stringify([2, 1, 0]),
+      `diamond levels ${JSON.stringify(resH.levels)} != [2,1,0]`,
+    );
+  });
+
+  check("T47 aggregateSubagents: the session cap boundary is exact", () => {
+    // 64 = the cap, 65 = one over. "Wide" tests (80 children) pass with a cap
+    // that is off by one in either direction; only the boundary pins it.
+    assert(resI.count === 64, `64 children: visited ${resI.count}, expected 64`);
+    assert(resI.perChild.length === 64, `64 children: perChild ${resI.perChild.length}`);
+    assert(resI.truncated?.count === false, "64 children must not report truncation");
+    assert(resI.truncated?.dropped === 0, `64 children dropped ${resI.truncated?.dropped}`);
+    assert(resJ.count === 64, `65 children: visited ${resJ.count}, expected 64`);
+    assert(resJ.truncated?.count === true, "65 children must report truncation");
+    assert(resJ.truncated?.dropped === 1, `65 children dropped ${resJ.truncated?.dropped}, expected 1`);
+    assert(resJ.perChild.length === 64, "the dropped child must not be measured");
+  });
+}
+
 if (failed) fatal(`${failed} unit test(s) failed`);
-pass(`all ${ranChecks} unit checks passed (T1-T44)`);
+pass(`all ${ranChecks} unit checks passed (T1-T47)`);
 
 // ---------------------------------------------------------------------------
 // (e) corporate-identifier scan — no employer/vendor-specific names may appear
@@ -3444,6 +4179,40 @@ console.log("\n(g) Desktop GUI bundle...");
     }
     if (!/const familyTotal\s*=\s*\(\)\s*=>\s*sumCtx\(/.test(panelSrc)) {
       fatal("familyTotal() no longer sums the family (sumCtx) - printing one window's ctx would be wrong");
+    }
+    // The list cap: a family can hold hundreds of rows, so the panel renders
+    // the split (shown + one hidden tail) instead of every child. If this
+    // drifts back to a plain `children()` list, the panel fills several screens
+    // again while the unit tests (T45) keep passing on the helper alone.
+    if (!/const children\s*=\s*createMemo\(\(\)\s*=>\s*splitFamily\(rows\(\)\)\)/.test(panelSrc)) {
+      fatal("the subagent list no longer goes through splitFamily(rows()) - the row cap was dropped");
+    }
+    if (!panelSrc.includes("<For each={children().shown}>")) {
+      fatal("the Desktop list must render the SHOWN split rows, not every child");
+    }
+    const moreAt = panelSrc.indexOf("+{tail().count} more");
+    if (moreAt < 0) {
+      fatal('gui/panel.tsx lost the "+N more" tail - hidden rows would be invisible');
+    }
+    // The tail must come from the SHARED builder (lib/format.js), not from a
+    // second hand-written string: the TUI prints familyTail().text and the unit
+    // test pins that text, so a divergent desktop copy would be untested.
+    if (!panelSrc.includes("familyTail(children().hidden, familyTotal())")) {
+      fatal("the Desktop tail no longer uses familyTail() - the two surfaces can drift");
+    }
+    if (moreAt < listAt) {
+      fatal("the +N more tail sits above the subagent list");
+    }
+    if (!panelSrc.slice(moreAt).includes("hiddenCtx")) {
+      fatal("the +N more tail no longer prints the hidden rows' summed ctx");
+    }
+    // TUI panel: same cap through the shared helper, same one-line tail.
+    const tuiPanelSrc2 = readFileSync(join(repoRoot, "lib", "tui-panel.ts"), "utf8");
+    if (!tuiPanelSrc2.includes("splitFamily(data().rows)")) {
+      fatal("the TUI panel no longer splits the family list - the row cap was dropped");
+    }
+    if (!tuiPanelSrc2.includes("familyTail(s.hidden, sumCtx(data().rows)).text")) {
+      fatal("the TUI panel lost its hidden-rows tail (or stopped using the shared familyTail)");
     }
   }
   pass(
