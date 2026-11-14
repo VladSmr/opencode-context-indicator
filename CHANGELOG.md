@@ -4,6 +4,32 @@ Notable user-facing changes per release. Dates are commit days (UTC).
 The package also ships a dual V1/V2 plugin — see the README for the surface
 matrix; everything below concerns the V2 path unless stated otherwise.
 
+## 1.9.4 - 2026-11-14
+
+- **Aligned with opencode 2.3.0 / OpenTUI 0.8.4.** Dev dependencies and the
+  typecheck target are now `@opencode/plugin` 2.3.0 and `@opentui/core` +
+  `@opentui/solid` 0.8.4; the isolated load + state-write e2e is re-run against
+  the 2.3.0 Desktop CLI. The 2.2.7 -> 2.3.0 diff in `@opencode/plugin` is
+  additive: a new `fork` session hook (`{ sessionID }`), `SessionRequest.messages`
+  typed as `SessionRequestMessage` (a `Message` plus a read-only `metadata`), a
+  cancellable `signal` on the promise `ToolContext`, an OAuth `submit` on
+  integrations and one new GUI `IconName`. The whole `dist/tui/*` surface this
+  plugin typechecks and loads against is **byte-identical**, so no runtime change
+  was needed.
+- **The compaction ceiling is unchanged in 2.3.0.** `drift-watch` still parses
+  `reserve=max(15%, 16000)`, `window=min(input, context)` and
+  `outputMax=256000` from the released core, so every displayed percentage keeps
+  its meaning.
+- **Background subagents by default (host change, no plugin change needed).**
+  opencode 2.3.0 returns a subagent's session ID immediately and lets the child
+  report back whenever it goes idle, so a family can keep growing after the
+  parent's turn ends. The panel already discovers descendants from the persisted
+  `parentID` chain and caps the list at the 20 heaviest rows, so those sessions
+  appear as they serve requests and the family total keeps summing every row.
+- `@opentui/solid` 0.8.4 is a version-only release (its `package.json` pins
+  `@opentui/core` 0.8.4); the `jsx()`/getter surface the TUI code uses is
+  unchanged, so the host-bridge allowlist and gate (b) still apply verbatim.
+
 ## 1.9.3 - 2026-11-12
 
 - **The family list is capped; the family total is not.** `/cx` and the Desktop

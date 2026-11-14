@@ -108,7 +108,7 @@ ceiling = window - reserve
 
 This mirrors `calculateCeiling()` in
 `packages/core/src/session/compaction.ts`, whose `RESERVE_SHARE` is 0.15 in every
-released host from 2.1.4 through 2.2.7 (the merged PR #51271 description
+released host from 2.1.4 through 2.3.0 (the merged PR #51271 description
 mentions 10%, but the shipped code kept 15%; the reply cap from that PR,
 `OUTPUT_TOKEN_MAX = 256_000`, sizes the output and does not move the trigger.
 The unreleased `v2` branch has a different share and drops the

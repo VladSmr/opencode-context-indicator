@@ -40,7 +40,7 @@
  *     categories: user / assistant / reasoning / tool(args only) / system
  *       prompt / tool schemas / other(= input - sum of estimates) + subagents.
  *
- *   V2 sources (verified against @opencode/plugin 2.2.7 / @opencode/schema):
+ *   V2 sources (verified against @opencode/plugin 2.3.0 / @opencode/schema):
  *     - ctx.session.hook("context", cb)
  *         SessionContext = { sessionID, model: {providerID,id,variant?},
  *           system: SystemPart[] (mut), messages: Message[] (mut),
