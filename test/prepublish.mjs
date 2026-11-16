@@ -7,7 +7,7 @@
  *       the opencode TUI loader bridges (keeps npm installs live, #33884)
  *   (c) resolve chain - host-bridged modules resolve, local imports exist, and
  *       none of them is a production dependency (no duplicate instance)
- *   (d) unit-harness T1-T47 (137 checks) for the limit/agent/state/command/
+ *   (d) unit-harness T1-T48 (138 checks) for the limit/agent/state/command/
  *       Desktop-RPC fixes, the family list cap, family-aware retention (incl. a
  *       randomized invariant test and a 120-step merge/evict soak) and the
  *       recursive V1 subagent walk (caps, diamond, waves, failures)
@@ -1756,6 +1756,21 @@ check("T29 subagent roll-up survives a child idle, swept by the parent idle", ()
     data: { sessionID: "ses_KID", tokens: { input: 300, output: 20, reasoning: 5 } },
   });
   assert(sessionTotals.get("ses_KID")?.input === 300, "child totals accumulated");
+
+  // A long-lived ROOT must protect its once-captured attribution: without the
+  // touch inside the step handler the LRU cap would drop the root first and its
+  // children would later be classified as orphan roots. Throttle the live
+  // breakdown write first so this assertion never touches the shared state file.
+  cacheMod.lastBdWrite.set("ses_ROOTKID", Date.now());
+  void mod.handleV2Event(t29Ctx, {
+    type: "session.step.ended",
+    data: { sessionID: "ses_ROOTKID", tokens: { input: 10, output: 0, reasoning: 0 } },
+  });
+  assert(
+    [...sessionParentCache.keys()].pop() === "ses_ROOTKID",
+    `a stepping root must refresh its attribution: ${[...sessionParentCache.keys()].join(",")}`,
+  );
+  cacheMod.lastBdWrite.delete("ses_ROOTKID");
 
   void mod.handleV2Event(t29Ctx, { type: "session.idle", data: { sessionID: "ses_KID" } });
   assert(
@@ -3996,8 +4011,71 @@ check("T32 client-context fallback never shadows hook-measured categories", () =
   });
 }
 
+// ---------------------------------------------------------------------------
+// T48 - the capped in-process maps are recency-ordered (LRU by last WRITE).
+// A plain Map keeps a re-written key in its ORIGINAL slot, so pruneMap() used to
+// evict a session that was still reporting ahead of one that had gone idle.
+// ---------------------------------------------------------------------------
+{
+  const cacheMod = await import(pathToFileURL(join(repoRoot, "lib", "cache.js")).href);
+  const dedupMod = await import(pathToFileURL(join(repoRoot, "lib", "dedup.js")).href);
+
+  check("T48 recency maps: a re-written key survives the cap", () => {
+    // The class itself: set() on an existing key must move it to the tail.
+    const m = new cacheMod.RecencyMap();
+    m.set("a", 1); m.set("b", 2); m.set("c", 3);
+    m.set("a", 10);
+    assert([...m.keys()].join(",") === "b,c,a", `order after re-set: ${[...m.keys()].join(",")}`);
+    assert(m.get("a") === 10 && m.size === 3, "value and size must be unchanged by the move");
+
+    // pruneMap trims the front, so with recency order the coldest key goes first.
+    dedupMod.pruneMap(m, 2);
+    assert([...m.keys()].join(",") === "c,a", `after prune: ${[...m.keys()].join(",")}`);
+    assert(m.has("a"), "the hot key must survive the cap");
+
+    // Every Map INSTANCE exported by lib/cache.js is a capped map. Derive the
+    // list from the module, so a NEW plain `new Map()` cache fails here instead
+    // of slipping through a hardcoded list; the literal count is the second half
+    // of the pin (adding a cache is a deliberate act, update both).
+    const exportedMaps = Object.entries(cacheMod)
+      .filter(([, value]) => value instanceof Map)
+      .map(([name]) => name);
+    assert(
+      exportedMaps.length === 21,
+      `capped map count ${exportedMaps.length}, expected 21: ${exportedMaps.join(",")}`,
+    );
+    const plain = exportedMaps.filter((name) => !(cacheMod[name] instanceof cacheMod.RecencyMap));
+    assert(plain.length === 0, `not recency-ordered: ${plain.join(",")}`);
+    // Consumers still see a Map (iteration, get/set/delete, size).
+    assert(cacheMod.breakdownCache instanceof Map, "RecencyMap must stay a Map");
+
+    // Parent attribution is captured ONCE (session.created), so the map would be
+    // FIFO for a long-lived root without an explicit recency refresh. The helper
+    // must move an existing key to the tail and must never invent one.
+    const parents = cacheMod.sessionParentCache;
+    const backup = [...parents];
+    try {
+      parents.clear();
+      parents.set("ses_oldroot", null);
+      parents.set("ses_leaf", "ses_oldroot");
+      cacheMod.touchSessionParent("ses_oldroot");
+      assert(
+        [...parents.keys()].join(",") === "ses_leaf,ses_oldroot",
+        `touch order: ${[...parents.keys()].join(",")}`,
+      );
+      assert(parents.get("ses_oldroot") === null, "a null parentID must be preserved");
+      cacheMod.touchSessionParent("ses_missing");
+      assert(!parents.has("ses_missing"), "touch must not invent an entry");
+    } finally {
+      // Restore the shared map exactly as it was for the checks that follow.
+      parents.clear();
+      for (const [key, value] of backup) parents.set(key, value);
+    }
+  });
+}
+
 if (failed) fatal(`${failed} unit test(s) failed`);
-pass(`all ${ranChecks} unit checks passed (T1-T47)`);
+pass(`all ${ranChecks} unit checks passed (T1-T48)`);
 
 // ---------------------------------------------------------------------------
 // (e) corporate-identifier scan — no employer/vendor-specific names may appear

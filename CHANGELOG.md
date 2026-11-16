@@ -4,6 +4,26 @@ Notable user-facing changes per release. Dates are commit days (UTC).
 The package also ships a dual V1/V2 plugin — see the README for the surface
 matrix; everything below concerns the V2 path unless stated otherwise.
 
+## 1.9.5 - 2026-11-16
+
+- **In-memory caches are LRU by last write, not FIFO.** The capped per-instance
+  maps (live breakdown, tool schemas, the per-session tool-schema TTL cache, the
+  subagent roll-up and every `lastKnown*` value) now move a re-written key to the
+  tail, so `pruneMap()` drops the coldest entry instead of the one that happened
+  to be inserted first. Previously a session reporting on every step could be
+  evicted ahead of one that had gone idle - most visibly as a missing breakdown
+  or panel row for a long-running child once 256 sessions were in flight. The
+  parent attribution, captured once at `session.created`, is refreshed on every
+  step, so a long-lived root is no longer the first key dropped (that used to
+  turn its children into phantom root rows). The cap is RAM-only; `state.json`
+  retention is unchanged (still whole-family).
+- The isolated e2e's live-Desktop PID probe retries once (with a shorter hard
+  timeout) when WMI/powershell gives no answer, so a transient hiccup no longer
+  turns the guard into a silent no-op. An empty answer is a valid result and is
+  never retried.
+- Unit harness: T48 pins the recency order and asserts every capped map is a
+  `RecencyMap` (138 checks).
+
 ## 1.9.4 - 2026-11-14
 
 - **Aligned with opencode 2.3.0 / OpenTUI 0.8.4.** Dev dependencies and the

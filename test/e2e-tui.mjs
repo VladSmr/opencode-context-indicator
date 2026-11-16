@@ -43,6 +43,9 @@
  *
  * Timings: INIT 45 s, STEP 80 s, PROBE 45 s, total budget ~260 s.  On timeout the PTY
  * process tree is killed and an ANSI-stripped diagnostic tail is printed.
+ * The live-Desktop PID probe is Windows-only and retries once per probe (up to
+ * ~10 s extra each; it runs before Check A and after Check C) when WMI/powershell
+ * gives no answer; an empty answer is a valid result.
  */
 
 import pty from "node-pty";
@@ -359,21 +362,44 @@ function runPty(extraArgs, timeoutMs, isDone, graceMs = 0, configDir, extraEnv) 
 // "both non-empty" condition would have skipped.
 // Name filter is explicit so the probe's own powershell (whose command line
 // contains the "serve --service" search string) is NOT matched.
-function desktopSnapshot() {
-  if (process.platform !== "win32") return null;
+//
+// A failed probe used to be skipped outright, so a transient WMI hiccup could
+// make the whole live-Desktop guard a no-op. One retry covers that case; it is
+// bounded by a shorter hard timeout so two stuck CIM calls cannot stretch the
+// run by a full extra 15 s. An empty answer ("") is a VALID result and is never
+// retried - retrying it would hide a real mid-run Desktop exit.
+const DESKTOP_PROBE_TIMEOUT_MS = 15_000;
+const DESKTOP_PROBE_RETRY_TIMEOUT_MS = 8_000;
+const DESKTOP_PROBE_RETRY_DELAY_MS = 1_500;
+
+function desktopSnapshotOnce(timeoutMs) {
   const psCmd = 'Get-CimInstance Win32_Process | Where-Object { ($_.Name -eq \'OpenCode.exe\') -or ($_.Name -eq \'opencode-cli.exe\' -and $_.CommandLine -like \'*serve --service*\') } | Sort-Object ProcessId | ForEach-Object { "$($_.ProcessId) $($_.Name)" }';
   try {
     const r = spawnSync(
       "powershell",
       ["-NoLogo", "-NoProfile", "-Command", psCmd],
       // Hard timeout: a stuck WMI/CIM service must not hang the whole e2e.
-      { encoding: "utf8", timeout: 15_000 },
+      { encoding: "utf8", timeout: timeoutMs },
     );
     // A timeout sets r.error and r.status = null; a crashing powershell exits
     // non-zero. Both are "no answer", not "no Desktop".
     if (r.error || r.status !== 0) return null;
     return (r.stdout || "").trim();
   } catch { return null; }
+}
+
+async function desktopSnapshot() {
+  // Non-win32: the probe is unsupported, retrying cannot help.
+  if (process.platform !== "win32") return null;
+  const first = desktopSnapshotOnce(DESKTOP_PROBE_TIMEOUT_MS);
+  if (first !== null) return first;
+  await new Promise((resolve) => setTimeout(resolve, DESKTOP_PROBE_RETRY_DELAY_MS));
+  const second = desktopSnapshotOnce(DESKTOP_PROBE_RETRY_TIMEOUT_MS);
+  console.log(
+    `\n[desktop] probe gave no answer; retried after ${DESKTOP_PROBE_RETRY_DELAY_MS} ms -> ` +
+      (second === null ? "still unavailable" : "ok"),
+  );
+  return second;
 }
 
 // Lingering-instance cleanup: the --standalone opencode-cli can survive the
@@ -802,7 +828,7 @@ async function main() {
     console.log("[e2e] running against ISOLATED opencode instance \u2014 your running sessions are not touched");
   }
 
-  const desktopBefore = quickMode ? "" : desktopSnapshot();
+  const desktopBefore = quickMode ? "" : await desktopSnapshot();
 
   const a = await checkA();
   if (!a) { console.error("\n[e2e FAILED] Check A"); finish(1); return; }
@@ -818,9 +844,10 @@ async function main() {
     // PID set means the test (or something it spawned) restarted, killed or
     // closed it, so the check FAILS instead of only printing a note. A manual
     // restart or an app update during the run produces the same difference - the
-    // message says so instead of blaming the test alone. A FAILED probe (null on
-    // both sides or on the after side) is logged and skipped, never failed.
-    const desktopAfter = desktopSnapshot();
+    // message says so instead of blaming the test alone. A probe that still has
+    // no answer after its one retry (null on either side) is logged and skipped,
+    // never failed; that path is now rare on purpose.
+    const desktopAfter = await desktopSnapshot();
     if (desktopBefore === null || desktopAfter === null) {
       console.log("\n[desktop] snapshot unavailable - the live-Desktop PID check was skipped");
     } else {

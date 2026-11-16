@@ -202,4 +202,6 @@ cycle belongs to that cycle's family; and the row the current write just
 measured is pinned, so the write can never evict its own measurement. Byte
 accounting counts the key and separator of every row, and the writer measures
 the file it is about to write. The per-instance in-memory maps keep their own
-smaller FIFO cap (256) - that one is RAM only and never touches the file.
+smaller cap (256) and are recency-ordered: a re-written key moves to the tail, so
+`pruneMap()` evicts LRU by last write and an actively updated session is never
+dropped ahead of an idle one. That cap is RAM only and never touches the file.
