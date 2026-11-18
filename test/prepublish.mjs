@@ -7,7 +7,7 @@
  *       the opencode TUI loader bridges (keeps npm installs live, #33884)
  *   (c) resolve chain - host-bridged modules resolve, local imports exist, and
  *       none of them is a production dependency (no duplicate instance)
- *   (d) unit-harness T1-T48 (138 checks) for the limit/agent/state/command/
+ *   (d) unit-harness T1-T48 (139 checks) for the limit/agent/state/command/
  *       Desktop-RPC fixes, the family list cap, family-aware retention (incl. a
  *       randomized invariant test and a 120-step merge/evict soak) and the
  *       recursive V1 subagent walk (caps, diamond, waves, failures)
@@ -1452,8 +1452,15 @@ check("T25b session.compacted event: skipped after the hook, fallback otherwise"
   assert(fallback25.compactStale === true && fallback25.updatedAt !== beforeEvent25, "event fallback writes + flags stale");
 });
 
-// T25c — the guard also protects a HEALTHY entry: a hook firing with a COLD
-// last-known cache (mirror instance / just after idle) must not zero ctx.
+// T25c — a compaction served by an instance with COLD counters (a short-lived
+// `oc run "/compact"` process, or the background compaction job opencode 2.3.1+
+// runs by default) must still leave a trace. Those counters are per-instance RAM
+// filled on `session.step.ended`, so a process that only compacts never has
+// them; the numbers come from the shared state file instead. The guard still
+// protects the healthy entry: ctx is never zeroed and no entry is invented. The
+// borrowed write counts as a measurement for the /context-diff baseline (that is
+// the point: the diff then spans "before compaction" -> "after"), so only the
+// zeroing/invention guarantees are pinned here.
 mod.writeStateFile("ses_T25E", "model-alpha", "test-provider", 5000, 5000, 0);
 mod.lastKnownCtxCache.delete("ses_T25E");
 mod.lastKnownInputCache.delete("ses_T25E");
@@ -1466,23 +1473,44 @@ const t25cErr = quietErr(() => mod.onV2Compaction({
   system: [], tools: {}, model: { id: "model-alpha", providerID: "test-provider" },
 }));
 const t25c = read().ses_T25E;
-// The hook armed nothing (it wrote nothing), so the trailing event MUST be the
-// fallback: without this, a cold-cache hook made a compaction leave no trace at
-// all ("after compaction nothing happens").
+// The hook persisted the mark, so the trailing event must defer to it. Pause
+// first: without it the event could land inside the same millisecond and the
+// updatedAt comparison would pass even with the arming guard removed.
+busyWait(5);
 await mod.handleV2Event(mockCtx, {
   type: "session.compacted",
   id: "evt25e",
   data: { sessionID: "ses_T25E" },
 });
 const t25cAfterEvent = read().ses_T25E;
-check("T25c compaction hook: cold last-known cache does not clobber ctx (no write)", () => {
+check("T25c compaction hook: cold counters borrow the persisted ctx, never zero it", () => {
   assert(t25cErr.length === 0, `no errors: ${t25cErr.join(" | ")}`);
   assert(t25c.ctx === 5000, `ctx preserved, got ${t25c.ctx}`);
-  assert(t25c.compactStale === false && !t25c.compactedAt, "no stale mark when nothing was measured");
+  assert(t25c.model === "model-alpha", `identity borrowed from the entry, got ${t25c.model}`);
   assert(
-    t25cAfterEvent.compactStale === true && !!t25cAfterEvent.compactedAt,
-    "the trailing session.compacted event must still mark the entry stale",
+    t25c.compactStale === true && !!t25c.compactedAt,
+    "a cold instance still records the compaction (no longer relies on the event)",
   );
+  assert(
+    t25cAfterEvent.updatedAt === t25c.updatedAt,
+    "the trailing session.compacted event defers to the hook that persisted",
+  );
+});
+
+// T25c2 — the no-op guard is unchanged: with NOTHING measured in RAM and NO
+// persisted entry, the hook writes nothing (no fake stale badge, no phantom row).
+const t25c2Err = quietErr(() => {
+  mod.lastKnownCtxCache.delete("ses_T25G");
+  mod.lastKnownInputCache.delete("ses_T25G");
+  mod.onV2Compaction({
+    sessionID: "ses_T25G",
+    messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+    system: [], tools: {},
+  });
+});
+check("T25c2 compaction hook: cold counters and no persisted entry write nothing", () => {
+  assert(t25c2Err.length === 0, `no errors: ${t25c2Err.join(" | ")}`);
+  assert(!read().ses_T25G, "no state entry invented for an unmeasured session");
 });
 
 // T25d — the arming guard itself: the compaction hook fires on EVERY instance
@@ -1492,9 +1520,9 @@ check("T25c compaction hook: cold last-known cache does not clobber ctx (no writ
 // write. Simulated by holding the state lock across the hook call — the only
 // way to make writeStateFile return false while ctxTokens > 0.
 mod.writeStateFile("ses_T25F", "model-alpha", "test-provider", 4000, 4000, 0);
-// The compaction hook reads the LAST-KNOWN counters, not state.json: seed them,
-// otherwise `ctxTokens === 0` skips the whole write block and the guard under
-// test is never reached (the test would then pass for the wrong reason).
+// The compaction hook resolves the numbers from the per-instance counters first
+// and only then from state.json. Seed them so this test exercises the IN-MEMORY
+// branch (the arming guard below), not the persisted-entry fallback.
 mod.lastKnownCtxCache.set("ses_T25F", 4000);
 mod.lastKnownInputCache.set("ses_T25F", 4000);
 const t25dLockFile = `${HARNESS_STATE}.lock`;

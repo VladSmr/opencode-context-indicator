@@ -108,7 +108,7 @@ ceiling = window - reserve
 
 This mirrors `calculateCeiling()` in
 `packages/core/src/session/compaction.ts`, whose `RESERVE_SHARE` is 0.15 in every
-released host from 2.1.4 through 2.3.0 (the merged PR #51271 description
+released host from 2.1.4 through 2.3.2 (the merged PR #51271 description
 mentions 10%, but the shipped code kept 15%; the reply cap from that PR,
 `OUTPUT_TOKEN_MAX = 256_000`, sizes the output and does not move the trigger.
 The unreleased `v2` branch has a different share and drops the
@@ -135,6 +135,33 @@ in one server process with **different** buffers, the last writer of a session's
 state entry wins and that entry may briefly carry the other project's reserve.
 Run separate servers when the buffers differ, or rely on the next request from
 the owning instance to correct it.
+
+## Compaction hook and the stale mark
+
+opencode dispatches the `compaction` hook at the START of a compaction request
+with the same pre-compaction payload the `context` hook sees, so the plugin
+persists the true pre-compaction split and marks the entry `compactStale` until
+the next model request re-measures it. The trailing `session.compacted` event is
+only a fallback for the case where the hook could not persist (no armed mark
+within 60 s).
+
+The numbers to mark are the per-instance `lastKnown*` counters, which are filled
+on `session.step.ended`. A process that **only** compacts never runs a step:
+that is `oc run "/compact"` in its own process, and since **opencode 2.3.1** also
+the background compaction that runs by default (`compaction.background: false`
+turns it off). Such an instance therefore has empty counters; before 1.9.6 it
+skipped the write and, if it exited before the trailing event, the compaction
+left no trace at all. It now borrows `ctx`/`input`/`reasoning`/model/provider and
+the prompt-cache figures from the session's persisted state entry. Nothing is
+zeroed and no entry is invented: with no persisted entry either (a genuine no-op
+compaction on a session that never measured), the hook still writes nothing.
+
+Because the summary may now be produced in the background, the interval between
+"compaction started" and "the next request re-measures" is longer than it used to
+be. The plugin does not try to model that window: it keeps showing the
+pre-compaction numbers with the stale marker instead of guessing the post-summary
+size, and a background summary that is never used still costs tokens in the
+host's own accounting.
 
 ## Why npm installs stay live
 

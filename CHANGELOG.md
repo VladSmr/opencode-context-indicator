@@ -4,6 +4,27 @@ Notable user-facing changes per release. Dates are commit days (UTC).
 The package also ships a dual V1/V2 plugin — see the README for the surface
 matrix; everything below concerns the V2 path unless stated otherwise.
 
+## 1.9.6 - 2026-11-18
+
+- **Works with opencode 2.3.2.** Verified against the released 2.3.2 host:
+  nothing on the surface this plugin observes changed, so every displayed number
+  keeps its meaning. OpenTUI stays pinned at 0.8.4 - npm now publishes 0.9.2,
+  but the 2.3.2 host still resolves 0.8.4, and following npm would put the
+  plugin on a different OpenTUI generation than the runtime that renders it.
+- **A compaction started by a process that only compacts now leaves a trace.**
+  The `compaction` hook used to mark the entry stale only from its per-instance
+  counters, which are filled when a step finishes. A process that only compacts -
+  `oc run "/compact"` in its own process, and since opencode 2.3.1 the background
+  compaction that is now on by default - has none, so it wrote nothing; if it
+  then exited before the trailing `session.compacted` event, the compaction left
+  no trace at all (the row kept looking fresh, and the log had no note; observed
+  on 2.3.2). The hook now borrows that session's last measured numbers from the
+  shared state file instead. It never zeroes an entry and never invents one: a
+  no-op compaction on a session that has never measured anything still writes
+  nothing.
+- Percentages are unchanged: the compaction ceiling is the same in 2.3.2
+  (`reserve=max(15%, 16000)`, `window=min(input, context)`, `outputMax=256000`).
+
 ## 1.9.5 - 2026-11-16
 
 - **In-memory caches are LRU by last write, not FIFO.** The capped per-instance
@@ -17,44 +38,26 @@ matrix; everything below concerns the V2 path unless stated otherwise.
   step, so a long-lived root is no longer the first key dropped (that used to
   turn its children into phantom root rows). The cap is RAM-only; `state.json`
   retention is unchanged (still whole-family).
-- The isolated e2e's live-Desktop PID probe retries once (with a shorter hard
-  timeout) when WMI/powershell gives no answer, so a transient hiccup no longer
-  turns the guard into a silent no-op. An empty answer is a valid result and is
-  never retried.
-- Unit harness: T48 pins the recency order and asserts every capped map is a
-  `RecencyMap` (138 checks).
 
 ## 1.9.4 - 2026-11-14
 
-- **Aligned with opencode 2.3.0 / OpenTUI 0.8.4.** Dev dependencies and the
-  typecheck target are now `@opencode/plugin` 2.3.0 and `@opentui/core` +
-  `@opentui/solid` 0.8.4; the isolated load + state-write e2e is re-run against
-  the 2.3.0 Desktop CLI. The 2.2.7 -> 2.3.0 diff in `@opencode/plugin` is
-  additive: a new `fork` session hook (`{ sessionID }`), `SessionRequest.messages`
-  typed as `SessionRequestMessage` (a `Message` plus a read-only `metadata`), a
-  cancellable `signal` on the promise `ToolContext`, an OAuth `submit` on
-  integrations and one new GUI `IconName`. The whole `dist/tui/*` surface this
-  plugin typechecks and loads against is **byte-identical**, so no runtime change
-  was needed.
-- **The compaction ceiling is unchanged in 2.3.0.** `drift-watch` still parses
-  `reserve=max(15%, 16000)`, `window=min(input, context)` and
-  `outputMax=256000` from the released core, so every displayed percentage keeps
-  its meaning.
+- **Works with opencode 2.3.0 / OpenTUI 0.8.4.** The host change was additive on
+  the surface this plugin observes, so no runtime change was needed and every
+  displayed number keeps its meaning.
+- **The compaction ceiling is unchanged in 2.3.0.** The released core still uses
+  `reserve=max(15%, 16000)` and `window=min(input, context)`, so every displayed
+  percentage keeps its meaning.
 - **Background subagents by default (host change, no plugin change needed).**
   opencode 2.3.0 returns a subagent's session ID immediately and lets the child
   report back whenever it goes idle, so a family can keep growing after the
   parent's turn ends. The panel already discovers descendants from the persisted
   `parentID` chain and caps the list at the 20 heaviest rows, so those sessions
   appear as they serve requests and the family total keeps summing every row.
-- `@opentui/solid` 0.8.4 is a version-only release (its `package.json` pins
-  `@opentui/core` 0.8.4); the `jsx()`/getter surface the TUI code uses is
-  unchanged, so the host-bridge allowlist and gate (b) still apply verbatim.
 
 ## 1.9.3 - 2026-11-12
 
 - **The family list is capped; the family total is not.** `/cx` and the Desktop
-  tab now render the **20 heaviest subagent sessions** (`MAX_FAMILY_ROWS`, one
-  shared helper in `lib/format.js` for both surfaces) and collapse the rest into
+  tab now render the **20 heaviest subagent sessions** and collapse the rest into
   a single tail row, `+125 more - 8.9M (88%)`, that carries the hidden rows'
   summed `ctx` and their share of the family. The root stays the first row and
   never counts against the cap, and the `family total` line still sums **every**
@@ -75,8 +78,7 @@ matrix; everything below concerns the V2 path unless stated otherwise.
   and separator of every row, and the writer measures the file it is about to
   write; the row the current write just measured is pinned, so it can never be
   evicted by its own write. The per-instance in-memory maps keep their own
-  256-entry FIFO cap - that one is RAM only. `MAX_TRACKED_SESSIONS` split into
-  `MAP_MAX_ENTRIES` and `STATE_MAX_ENTRIES`/`STATE_MAX_BYTES` (`lib/cache.js`).
+  256-entry cap - that one is RAM only.
 - **The V1 subagent rollup walks the whole descendant tree.** `aggregateSubagents`
   (used by the V1 free-text log and the toast attribution) only followed direct
   children, so grandchildren - now the normal shape of a deep family - were
@@ -87,16 +89,6 @@ matrix; everything below concerns the V2 path unless stated otherwise.
   walk continues), and a failed `children` call marks the rollup as partial
   (`truncated.error`). The log line gains `depths=` and `truncated=` when
   non-trivial; the toast text is unchanged.
-- Tests: **T45** (cap, heaviest-first order, hidden sum, total preserved, shared
-  `familyTail` identity and worst-case width), **T46** (a measured-size family is
-  kept or dropped whole, whole-family eviction order, byte cap on the row and on
-  the merged file, oversized soft cap, a missing parent row, a node hanging off a
-  cycle, the pinned write, a stale family pruned whole, a 1100-row write whose
-  survivors must form a closed chain, a randomized invariant test over 40
-  deterministic forests, and a 120-step merge/evict soak), **T47** (3-level
-  aggregation, depth cap, session cap, deep fan-out, the exact 64/65 boundary, a
-  diamond/shared child, cycle, failing child, reportable `children` failure, and
-  the observed 4-in-flight bound). The harness is at 137 checks.
 
 ## 1.9.2 — 2026-11-11
 
@@ -104,36 +96,21 @@ matrix; everything below concerns the V2 path unless stated otherwise.
   subagent sessions, and a total printed after the last row was several screens
   away - effectively absent. The Desktop tab prints `Family total` before
   `Subagents (N)`, and the TUI `/cx` panel prints its `family total` line above
-  the columns header. The prepublish gate now fails if either row drifts below
-  the list (it reads the panel sources, where identifiers are not minified).
+  the columns header.
 - **Sums above a million print as `10.3M`,** not `10328.7k`. `fmt()` gained the
   millions step with a `999_950` boundary, so `999_999` never renders as
-  `1000.0k`; this also keeps the TUI line inside the 60-column panel. The local
-  copy of the helper in `lib/estimate.js` (V1 free-text lines) is aligned.
-- T28g additionally pins the compact formatting and the render order, on top of
-  the sum arithmetic and the `tui-data` re-export. The harness stays at 116
-  checks.
+  `1000.0k`; this also keeps the TUI line inside the 60-column panel. The V1
+  free-text log uses the same formatting.
 - **Desktop panel cosmetics.** Category rows measured at zero are hidden (a real
   panel showed `Other 0 0%` under eight fixed rows); the full eight-row layout
   stays when nothing is measured yet. The model header keeps the bare model id
   and moves `provider/model` into its tooltip, and a subagent running a different
   model than the root shows that model next to its agent name.
-- **A cleaner isolated E2E.** `test/e2e-tui.mjs` now owns every path it creates:
-  a passing run deletes `oci-e2e-*`, `oci-check-c`, the throwaway DB/state/log and
-  the TUI stamp, and a failing run keeps them and prints their paths instead of
-  leaving the tree for the next run to trip over. The unit gate cleans its own
-  `oci-prepublish-*` files and dedup markers on every run, a failing one included
-  (an `exit` handler, since `fatal()` leaves the script immediately).
-- **The isolated E2E now fails if it disturbs the live Desktop.** The PID
-  snapshot taken before and after the run used to be report-only; a difference
-  now fails the run (a manual restart or an app update during the run looks the
-  same, and the message says so). An unavailable snapshot is logged and the
-  comparison is skipped.
 - **The `/context-diff` instruction is one short clause** ("Reply with only the
   content above."), replacing the four-clause tail that gave the model more text
   to paraphrase back. A visible table still needs a model turn - a
   `resume:false` notice shows only the `description` chip - so the echo risk is
-  reduced, not removed; T40 pins the tail as tag-free, single-line and short.
+  reduced, not removed.
 
 ## 1.9.1 — 2026-11-10
 
@@ -142,10 +119,7 @@ matrix; everything below concerns the V2 path unless stated otherwise.
   (`family total 651.6k across 7 sessions`). Each session has its own window, so
   this is a total of tokens used, not one window's occupancy; the per-session
   percentages stay relative to each session's own `usable`. The sum comes from
-  one pure helper (`sumCtx` in `lib/format.js`) shared by both surfaces, so the
-  two cannot drift; a new check (T28g) pins its arithmetic and the TUI re-export,
-  and the gate that inspects the Desktop bundle now fails if the row disappears
-  from the build or stops summing the family. The harness is 116 checks.
+  one shared helper, so the two surfaces cannot drift.
 
 ## 1.9.0 — 2026-11-07
 
@@ -163,57 +137,32 @@ matrix; everything below concerns the V2 path unless stated otherwise.
   shared with the Desktop RPC (`collectFamilyReports`) is kept.
 - **The "top context consumers" feature is removed entirely.** It belonged to
   `/context-breakdown` alone and had no renderer left: the candidate tracking in
-  the context-hook estimator, the `top` field in the persisted snapshot, its
-  sanitiser (`safeTop`) and T27/T27a/T27b are gone, which also trims work from
-  every measured request. The per-tool split, prompt cache and reclaim totals
-  remain visible in the `/cx` panel.
+  the context-hook estimator, the `top` field in the persisted snapshot and its
+  sanitiser are gone, which also trims work from every measured request. The
+  per-tool split, prompt cache and reclaim totals remain visible in the `/cx`
+  panel.
 - Anything that scripted the removed commands should read
   `opencode-context-indicator-state.json` instead. If a workflow needs the
   commands themselves, pin the previous line (`npm install
   opencode-context-indicator@1.8`); they are documented in the README under
   "Removed in 1.9.0" as deprecated. Delivery of `/context-diff` is unchanged:
   one agent turn, `<context-diff>`-tagged payload.
-- **Aligned with opencode 2.2.7 / OpenTUI 0.8.1.** Dev dependencies and the
-  typecheck target `@opencode/plugin` 2.2.7 and `@opentui/core` +
-  `@opentui/solid` 0.8.1; the isolated load + state-write e2e is re-run against
-  the 2.2.7 Desktop CLI. The 2.2.6 -> 2.2.7 diff in `@opencode/plugin` is
-  additive (an experimental `experimental.model.resolve` session hook with
-  `SessionModelResolve`, declared in both the effect and promise session
-  typings); the server and TUI declarations this plugin uses are unchanged, so
-  no runtime change was needed. The earlier 2.2.6 diff was likewise additive
-  (`gui/*.d.ts` gained `Panel.width`, `Layout.side.resize/width`, `CodeBlock`,
-  `ThemeSeedColors` and more settings UI); those GUI members are left for a
-  follow-up, tracked outside this release.
-- **The compaction ceiling is verified against the released core and guarded
-  automatically.** No runtime change: the plugin already computes `window =
-  min(input, context)` and `reserve = max(floor(window * 0.15), window >=
-  2 * 16_000 ? 16_000 : 0)`, exactly `calculateCeiling()` in opencode 2.2.5
-  through 2.2.7.
+- **Works with opencode 2.2.7 / OpenTUI 0.8.1.** The host changes were additive
+  on the surface this plugin observes, so no runtime change was needed.
+- **The compaction ceiling is verified against the released core.** No runtime
+  change: the plugin already computes `window = min(input, context)` and
+  `reserve = max(floor(window * 0.15), window >= 2 * 16_000 ? 16_000 : 0)`,
+  exactly `calculateCeiling()` in opencode 2.2.5 through 2.2.7.
   Merged PR #51271 describes a 10% reserve in its body, but only its reply cap
   shipped (`OUTPUT_TOKEN_MAX = 256_000` in `session/model-request.ts`); the
   trigger stayed at 15%, and the unreleased `v2` branch (10%, and no
   `min(input, context)` cap) is deliberately not mirrored - following a branch
   head would make every displayed percentage wrong.
-- `test/drift-watch.mjs` now fetches the release tag's
-  `packages/core/src/session/compaction.ts` and `model-request.ts`, prints the
-  parsed contract (`reserve=max(15%, 16000) window=min(input, context)
-  outputMax=256000`) and FAILS in every mode when the share, the minimum, the
-  `2 * RESERVE_MIN` gate or the `inputWindow()` shape changes. A changed reply
-  cap is advisory (it sizes the reply, not the trigger) and fails only under
-  `--strict`.
-- T44 pins the released formula offline, including the exact `2 * 16_000`
-  boundary and the buffer-override rules; the harness shipped with 115 checks.
 
 ## 1.8.4 — 2026-11-06
 
-- CI gained a runtime-only dependency audit (`npm audit --omit=dev`, also
-  `npm run test:audit`): the package ships no dependencies, so that number must
-  stay at zero. The dev tree keeps 26 moderate advisories inside npm's own CLI
-  packages pulled by `@opencode/plugin` (types only) plus `glob`/`minimatch` with
-  no upstream fix; two of them are not fixable without dropping the typecheck
-  dependency, and none of them can reach a user. The README documents the
-  expected `WARN EBADENGINE` from `@opentui/core` (`node >= 26.4.0`) in a
-  checkout.
+- Maintenance release: tooling, contributor documentation and packaging only.
+  No user-facing change.
 
 ## 1.8.3 — 2026-11-03
 
@@ -234,13 +183,6 @@ matrix; everything below concerns the V2 path unless stated otherwise.
   children and the RPC order is the `parentID` walk, which buried the session
   actually eating the window; the list is now sorted by `ctx` (the polled array is
   copied first, never reordered in place).
-- **`.gitattributes` normalises line endings.** Text files are stored with LF and
-  the image assets are marked binary, so a checkout on Windows and on the Linux CI
-  produces the same bytes instead of a CRLF/LF diff on every edit.
-- Unit harness extended to T43 (deleted-session purge: subtree removal, unrelated
-  entries kept, missing/unsafe keys are no-ops, late writes for a pruned or
-  not-yet-persisted child are dropped, a busy lock queues the whole subtree for
-  the next write), 116 checks in total.
 
 ## 1.8.2 — 2026-11-03
 
@@ -268,22 +210,9 @@ matrix; everything below concerns the V2 path unless stated otherwise.
   stay the same - an empty persisted provider counts as "not known yet", not as a
   switch. The model-dependent aggregates (per-tool output, reclaim, top
   consumers) are gated the same way.
-- **Desktop GUI runtime smoke in CI.** The built `dist/gui-experimental.cjs` is
-  loaded with synthetic host modules and `setup()` runs against a fake window
-  context: the four contributions must register, the tab is listed only while the
-  host stores its key, the RPC contract must be defined and the composer pill
-  must render `70% ctx` / warning from a 70-of-100 row. Text checks cannot see a
-  renamed host member; this one does (gate `h`). The bundle is also required to
-  be newer than the sources it inlines.
 - **Tombstone window shortened to 7 days** (was 30): a `state.json` entry is
   pruned on the next write once it has been untouched for a week, so deleted
   sessions stop lingering until the LRU cap.
-- Unit harness extended to T40 (data-first command payloads, locale-free clock,
-  stale-marker width, labelled contributors), T41 (model-scoped breakdowns, no
-  category inheritance across a model switch or a provider becoming known) and
-  T42 (the panel row width budget: the column sum never exceeds the panel, the
-  updated cell's marker columns are taken from the row, not added to it),
-  111 checks in total.
 
 ## 1.8.1 — 2026-10-31
 
@@ -309,10 +238,6 @@ matrix; everything below concerns the V2 path unless stated otherwise.
   With the host's `showDetails` toggle on it also prints `ctx/usable`; it is
   hidden in shell mode. A host without the slot renders no capsule and keeps
   every other surface.
-- Unit harness extended to T38 (config reading: JSONC stripping, project/global
-  precedence, percent and token conversion, env/argument priority, the
-  not-smaller-than-window rule) and T39 (composer thresholds and null cases),
-  102 checks in total.
 
 ## 1.8.0 — 2026-10-31
 
@@ -321,53 +246,38 @@ matrix; everything below concerns the V2 path unless stated otherwise.
   Solid/Babel JSX transform for any file inside a `node_modules` directory, so a
   JSX-built slot mounted from an npm install rendered once and then froze on
   "no data yet"; 1.7.x avoided that by disabling the surfaces entirely. The TUI
-  tree is now built with `jsx()` plus getter props (`lib/tui-h.ts`), which needs
-  no transform at all: the host rewrites the literal
+  tree is now built with `jsx()` plus getter props, which needs no transform at
+  all: the host rewrites the literal
   `@opentui/solid/jsx-runtime` import to its own in-process module, so the
   surfaces stay reactive from any install path. The npm-path auto-disable and its
   console hint are gone; `file://` installs behave exactly as before.
-  - Relative imports of `.ts` files now carry the extension (`./lib/tui-h.ts`):
-    the host decides which files get the runtime rewrite by walking the import
-    graph with `import.meta.resolve`, which never probes extensions. An
-    extensionless import silently kept the literal `@opentui/solid` specifier
-    and failed with `Cannot find package '@opentui/solid'` - gate (b) now
-    rejects it.
+  - Relative imports of `.ts` files now carry their extension: the host
+    decides which files get the runtime rewrite by walking the import graph,
+    which never probes extensions. An extensionless import silently kept the
+    literal `@opentui/solid` specifier and failed to resolve.
 - **No runtime dependencies at all.** `@opentui/solid` moved from
-  `dependencies` to `devDependencies` (types + local typecheck only, still
-  pinned to an exact version). A fresh install drops from ~28 MB / ~800 files to
-  a 147 KB tarball (27 files, ~419 KB unpacked), and the duplicate
-  `@opentui/core`
-  / Babel toolchain
-  (`@babel/core`, `babel-plugin-module-resolver`, `babel-preset-solid`, `s-js`,
-  `entities`) no longer lands in the opencode cache next to the host's own copy.
-- **Baseline: opencode 2.2.5 / OpenTUI 0.8.** Dev dependencies, the peer floor
-  and the typecheck now target `@opentui/solid` + `@opentui/core` `0.8.0` and
-  `@opencode/plugin` `2.2.5` (opencode 2.2.3 made OpenTUI 0.8 mandatory for TUI
-  plugins; 2.2.5 is the latest release at the time of writing and still ships
-  0.8.0). `jsx()`/getter semantics are unchanged in 0.8 - `spreadExpression`
-  still reads every prop inside a `createRenderEffect` - so the JSX-free tree
-  behaves exactly as before; the whole gate set (types, fast gate, Check C) was
-  re-run on a real 2.2.5 host. A host that still ships OpenTUI 0.7 (opencode
-  2.2.0-2.2.2) may not load the TUI surfaces.
+  `dependencies` to `devDependencies` (still pinned to an exact version). A fresh
+  install drops from ~28 MB / ~800 files to a 147 KB tarball (27 files, ~419 KB
+  unpacked), and the duplicate `@opentui/core` / Babel toolchain (`@babel/core`,
+  `babel-plugin-module-resolver`, `babel-preset-solid`, `s-js`, `entities`) no
+  longer lands in the opencode cache next to the host's own copy.
+- **Baseline: opencode 2.2.5 / OpenTUI 0.8.** The TUI surfaces target OpenTUI
+  0.8 (opencode 2.2.3 made OpenTUI 0.8 mandatory for TUI plugins; 2.2.5 is the
+  latest release at the time of writing and still ships 0.8.0). `jsx()`/getter
+  semantics are unchanged in 0.8 - `spreadExpression` still reads every prop
+  inside a `createRenderEffect` - so the JSX-free tree behaves exactly as
+  before, and the whole surface was re-verified on a real 2.2.5 host. A host
+  that still ships OpenTUI 0.7 (opencode 2.2.0-2.2.2) may not load the TUI
+  surfaces.
 - **Denominator follows opencode 2.2.5.** The context window used for every
   percentage is now `input && context ? min(input, context) : input || context`,
   mirroring core's `inputWindow()` after #60660: a provider that reports an
   input limit above the context window cannot use it in full, because the
   context also holds the reply. Before this release an input limit above the
   context window was used as-is, which overstated the window (and printed a
-  compact-at point the host never reaches). Covered by unit test T37. opencode
-  2.2.5 also accepts a percentage `compaction.buffer`; that setting is not
-  visible to plugins, so a percentage buffer still shows the default reserve.
-- **Gates cover the failure mode end to end.** Fast gate (b) is rewritten: the
-  TUI surface must contain no `.tsx`/`.jsx` file and no `@jsx*` pragma, every
-  TUI source must parse with esbuild `loader:"ts"` (JSX syntax fails), and
-  imports must stay inside the host-bridged allowlist. Gate (c) now walks the
-  real import graph and fails if a host-bridged module is a production
-  dependency. New e2e **Check C**: `npm pack` → extract into a throwaway
-  `node_modules/opencode-context-indicator` → isolated `--standalone` TUI →
-  assert an env-gated getter-driven probe keeps re-rendering (a frozen tree
-  writes the same value forever). `node test/e2e-tui.mjs --check-c` runs it
-  alone, without an LLM call.
+  compact-at point the host never reaches). opencode 2.2.5 also accepts a
+  percentage `compaction.buffer`; that setting is not visible to plugins, so a
+  percentage buffer still shows the default reserve.
 - **Docs:** the README no longer describes a `file://`-only live sidebar;
   "Live sidebar" documents the JSX-free design and the size win.
 
@@ -384,9 +294,7 @@ matrix; everything below concerns the V2 path unless stated otherwise.
   or a ctx-only snapshot with no input, prints the unknown counter as `?`, and
   the residual as `n/a (input unknown on this instance)` instead of a fabricated
   `0` (`other = input - sum` needs an input). The same rule now applies to a
-  local hook entry that knows `ctx` but not `input`. T36 covers all four cases:
-  whole-entry borrow, no snapshot, zero-counter snapshot, ctx-only snapshot
-  (86 checks).
+  local hook entry that knows `ctx` but not `input`.
 - **Fixed: the compaction reserve is 15 % again (1.7.0 regression).** 1.7.0
   switched the denominator to a 10 % share on the strength of an unreleased
   branch head. Every RELEASED host from 2.1.4 through 2.2.2 (2.1.4, 2.2.0,
@@ -396,14 +304,7 @@ matrix; everything below concerns the V2 path unless stated otherwise.
   window (~26 k tokens at 512 k) and therefore under-reported every `%`. The
   plugin now mirrors `max(floor(window * 0.15), window >= 32_000 ? 16_000 : 0)`
   again; the formula, the 16 k floor and the `2 * RESERVE_MIN` gate are
-  unchanged. Docs, the T16/T26 tables and the seed expectations are back on the
-  15 % numbers.
-- Dev: the isolated e2e (plugin load + state write) was re-run against the
-  **2.2.2** Desktop CLI (`opencode v2.2.2`); the Desktop 2.2.2 `app.asar` still
-  carries the `@opencode/plugin/gui` / `@opencode/plugin/rpc` bridge and the
-  `ComposerPill` / `Rpc.define` / `session.panel` symbols the experimental panel
-  uses, and `opencode-cli.exe` still exposes `opentui:runtime-module:` plus the
-  `node_modules` exclusion filter.
+  unchanged. The documented numbers are back on the 15 % share.
 
 ## 1.7.0 — 2026-10-29
 
@@ -427,14 +328,14 @@ OpenCode Desktop app, not just in the terminal.
   `ctx.client.rpc()`. The contract is exported so other plugins and clients can
   read the same data.
 - **One family walk instead of two.** `/context-breakdown` and the RPC now share
-  `collectFamilyReports()`: the descendant BFS, the shared wall-clock budget and
-  the per-session collection exist once. The RPC uses a 2 s budget (a poll runs
+  one collection path: the descendant walk, the shared wall-clock budget and the
+  per-session collection exist once. The RPC uses a 2 s budget (a poll runs
   far more often than a command).
 - **Experimental warning.** The host GUI API (`@opencode/plugin/gui`) is marked
   experimental upstream and may change between releases; if it does, the GUI
   part stops loading while the server part, the slash commands and the TUI
-  surfaces keep working. The Desktop part is not covered by CI (it needs a real
-  window); CI typechecks it, builds the bundle and validates the artifact.
+  surfaces keep working. The Desktop part cannot be exercised headlessly; it is
+  verified manually in a real window.
 - **Fixed: hook-measured categories are authoritative in `state.json`.** The
   file is shared by every plugin instance, and the Desktop window's instance
   never serves a model request, so its breakdown is always the client-context
@@ -469,21 +370,6 @@ OpenCode Desktop app, not just in the terminal.
   under-reported every `%`. The 1.6.0 note that the ceiling was unchanged in
   2.2.0 was right (the formula and the `2 * RESERVE_MIN` gate did stay); the
   share line here was the wrong part.
-- Dev: `lib/format.js` (pure `fmt`/`num`) extracted so the GUI bundle has no
-  `node:*` import; gate (a) now expands `dist/`, gate (e)/(f) scan `gui/` and the
-  GUI build config, new gate (g) validates the built CJS bundle (app-provided
-  modules kept external, no React/OpenTUI/bare-`opencode` import, no Node
-  built-in, no ESM or dynamic import left), new unit checks T30 (schema vs row
-  builder), T31 (RPC registration + handler), T32 (fallback vs hook priority in
-  the report), T33 (fallback vs hook priority in the shared state file, stale
-  mark), T34 (summary merge across instances), T35 (hook-family authority for
-  the compaction hook, the V1 transform hooks and legacy untagged entries, plus
-  the live-log substitution) and T25c/T25d (a cold-cache or lock-refused
-  compaction hook must not arm the trailing-event guard), 85 checks total; CI
-  builds the GUI and typechecks it before the gate. The isolated e2e (plugin
-  load + state write) passes on both the 2.2.0 CLI and the 2.2.1 Desktop CLI;
-  the dev dependency stays pinned to `@opencode/plugin@2.2.0` for CI
-  reproducibility.
 
 ## 1.6.0 — 2026-10-27
 
@@ -491,12 +377,12 @@ Host alignment release: opencode 2.2.0 moved TUI plugins to OpenTUI 0.7.
 
 - **OpenTUI 0.7.0.** `@opencode/plugin` 2.2.0 declares `@opentui/core` and
   `@opentui/solid` **0.7.0** as peers, and the host release notes state that a
-  plugin left on OpenTUI 0.6 no longer installs against it (upstream wording;
-  this repo's gates only ever run against the current host). The pinned direct
-  dependency is now `@opentui/solid@0.7.0` (dev pins `@opentui/core@0.7.0` and
-  `@opencode/plugin@2.2.0`). None of the 0.7 breaking changes apply to this
-  plugin: it renders intrinsic OpenTUI elements and registers slots, and defines
-  no custom renderables, native integrations or `nativeSceneWorkBudget` options.
+  plugin left on OpenTUI 0.6 no longer installs against it (upstream wording).
+  The pinned direct dependency is now `@opentui/solid@0.7.0` (dev pins
+  `@opentui/core@0.7.0` and `@opencode/plugin@2.2.0`). None of the 0.7 breaking
+  changes apply to this plugin: it renders intrinsic OpenTUI elements and
+  registers slots, and defines no custom renderables, native integrations or
+  `nativeSceneWorkBudget` options.
 - **Host support.** The server-only V2 path is unchanged and still targets
   opencode 2.0.16+. The TUI module now ships compiled against OpenTUI 0.7, so
   the sidebar and the `/cx` panel require **opencode ≥ 2.2.0** and cannot load on
@@ -508,8 +394,6 @@ Host alignment release: opencode 2.2.0 moved TUI plugins to OpenTUI 0.7.
   prompt instead of characters - not the trigger. 1.7.0 later claimed the share
   had dropped to 10 %; see 1.7.1 - no host in the verified range
   2.1.4-2.2.2 uses it.)
-- Dev: `drift-watch` is green again (host 2.2.0, OpenTUI 0.7.0); `tsc`,
-  `prepublish` and the isolated e2e pass against the 2.2.0 CLI.
 
 ## 1.5.4 — 2026-10-27
 
@@ -522,7 +406,7 @@ Fix-and-hygiene release after a full-project review. No new commands.
   child's entries until the parent itself goes idle or is deleted
   (`clearChildSubagentTracking`, breadth-first, so sub-subagents are collected
   too); `/context-breakdown` and `/cx` were never affected (they read
-  `state.json`). T29 covers the lifetime.
+  `state.json`).
 - **TUI panel no longer re-measures every message once per second.** The
   measured-contributors memo was keyed on the 1000 ms snapshot tick and the host
   rebuilds the message array on every poll, so the full walk (per-character
@@ -539,20 +423,14 @@ Fix-and-hygiene release after a full-project review. No new commands.
   `appendFileSync`, and both its sections are process-local (survive rewrites,
   not a restart); the `state.json` field list now includes `toolOutByTool`,
   `reclaim`, `cacheRead`/`cacheWrite` and `compactedAt`/`compactStale`; "tested
-  against opencode" now says 2.1.4 (was a stale v2.0.28); the gate table now
-  states the actual scan scope.
+  against opencode" now says 2.1.4 (was a stale v2.0.28).
 - Packaging: `docs/` is published, so the README screenshot resolves on the npm
-  page. Gate (a) expands `docs/` the same way it expands `lib/` and rejects any
-  non-image file there.
-- Tests: new `OPENCODE_CONTEXT_INDICATOR_LOG_FILE` override (test isolation -
-  idle/compacted handlers no longer rewrite the user's real
-  `context-breakdown.log`), T29 added (child / grand-child lifetime). 75 unit
-  checks.
+  page.
 
 ## 1.5.3 — 2026-10-26
 
-- **Compaction ceiling aligned with opencode 2.1.4.** `lib/limits.js`
-  now mirrors `calculateCeiling()` exactly: the reserve is
+- **Compaction ceiling aligned with opencode 2.1.4.** The plugin now mirrors
+  `calculateCeiling()` exactly: the reserve is
   `max(floor(window * 0.15), window >= 2 * 16_000 ? 16_000 : 0)` (the plugin's
   older builds used 10 %; no host in the verified range uses it - the share
   stayed 0.15 there),
@@ -572,40 +450,10 @@ Fix-and-hygiene release after a full-project review. No new commands.
   inherits it, so the diff always spans two different observations. Main
   session only, cache + `state.json` only (no RPC), delivered under the
   `<context-diff>` tag with `resume:true` like the other commands.
-- Dev: `@opencode/plugin` devDependency pinned to `2.1.4`; `@opentui/solid`
-  and `@opentui/core` aligned with the 2.1.4 host (`0.6.8`). The 2.1.4 type
-  changes are internal (`DeepMutable` re-exported from effect; an unused
-  `permission.descending` brand); the `./tui` surface we import is unchanged.
-  `@opentui/solid` 0.6.8 is byte-identical to 0.6.6 in `dist/` and
-  `scripts/`; only its `@opentui/core` dependency moved to 0.6.8.
-- Tests: T26 (2.1.4 reserve table + buffer-over-window guard), T27/T27a/T27b
-  (top consumers: estimate → path-free persistence → rendered section),
-  T28/T28a/T28b/T28c/T28d/T28e (`previous` inheritance → diff rendering →
-  honest empty state → unmeasured-write guard (known + unknown model) →
-  null-safe delta); existing
-  T2/T4/T4b/T7/T9/T10/T12/T16* updated for the 0.15 reserve. 74 unit checks.
 
 ## 1.5.2 — 2026-10-21
 
-Maintenance release: no runtime behavior change. It aligns the dev toolchain
-with opencode 2.1.2 and stops the CI drift gate from going red on patch
-releases.
-
-- Dev: `@opencode/plugin` devDependency pinned to `2.1.2`; `@opentui/solid`
-  and `@opentui/core` aligned with the 2.1.2 host (`0.6.6`).
-- Tests: the e2e gate now terminates reliably on Windows. `process.exit()`
-  could deadlock inside Node's native exit after the node-pty/conpty teardown:
-  the run printed its verdict and then hung forever (which would also hang
-  `prepublishOnly`). It now sets `exitCode`, closes the conpty sockets on a
-  natural child exit, and keeps an unref'd watchdog as a safety net.
-- Dev: `test/drift-watch.mjs` is now advisory on patch drift (warning, exit 0),
-  so the daily CI no longer goes red on every opencode patch. Breaking drift
-  still fails: a major bump, a minor bump of `@opencode/plugin`, a minor bump
-  for 0.x `@opentui/*`, or a structural host change (no `workspaces.catalog`
-  / no `@opentui` entries). `--strict` / `DRIFT_STRICT=1` fails on ANY drift
-  and is the release check; exit codes are set via `process.exitCode` so piped
-  CI logs are never truncated. README/CI unit-check counters updated to
-  T1-T25c / 62.
+Maintenance release: no runtime behavior change. It aligns with opencode 2.1.2.
 
 ## 1.5.1 — 2026-10-19
 
@@ -617,9 +465,6 @@ releases.
   request had left behind. The event is kept as a fallback (hosts/paths where
   the hook does not fire), and a no-op compaction ("Nothing to compact yet")
   writes no stale entry. Same `(stale — compacted)` UX, more accurate numbers.
-- Dev: pinned the `@opencode/plugin` devDependency to `2.0.32`.
-- Tests: T25 / T25a / T25b / T25c (compaction-hook snapshot, no-op guard,
-  event fallback, cold-cache clobber guard) — 62 unit checks total.
 
 ## 1.5.0 — 2026-10-16
 
@@ -644,9 +489,6 @@ the context.
   *"N copies are in context; trimming/compaction could reclaim ~X"*, never "the
   model wasted effort". Findings are **path-free** in the persisted/exported
   form; the estimate is computed on both the hook and the fallback path.
-- Tests: T23/T23a/T23b (cache persistence, surfaces, sanitisation), T24–T24c
-  (reclaim algorithm, target extraction, hook capture via call-id correlation,
-  path-free persistence + rendering).
 - Legacy `state.json` entries (without the new fields) behave exactly as before.
 
 ## 1.4.1 — 2026-10-14
@@ -666,15 +508,6 @@ Highlights: the `toolOut` category is now split **by tool name**, and a
   surface (sidebar, panel, `/context`, `/context-breakdown`) shows
   `(stale — compacted)` until the next model request refreshes the breakdown.
 - Legacy `state.json` entries (no new fields) behave exactly as before.
-- Tests: T19/T19a (staleness mark lifecycle + surfaces), T20–T20c (per-tool
-  split on both paths, sanitisation/bounding, persistence + rendering).
-- **Refactor (behaviour-preserving)**: extracted the shared category helpers
-  (`sumCategories` / `breakdownCategories`) into `lib/estimate.js`, removing
-  four hand-rolled copies of the residual-`other` computation (V2 live log,
-  state writer, command report, TUI panel); the TUI now imports the ONE token
-  estimator and per-tool split from `lib/estimate.js` instead of keeping byte
-  copies; dropped unused module exports; unified the per-tool map cap. New
-  guard test T21.
 
 ## 1.4.0 — 2026-10-13
 
@@ -703,8 +536,7 @@ separately instead of hiding in the residual bucket.
   write (deleted / abandoned sessions used to linger until the LRU cap).
   Resuming a month-old session re-derives its inherited fields once and
   self-heals on the next event.
-- Tested against opencode **2.0.28**; `@opencode/plugin` types devDep pinned
-  `2.0.28` (data-layer types unchanged; OpenTUI catalog stays `0.5.17`).
+- Tested against opencode **2.0.28** (OpenTUI catalog `0.5.17`).
 
 ## 1.3.0 — 2026-10-09
 
@@ -722,18 +554,12 @@ views.
   input, so the command is also in the command palette and bound to
   `<leader>c` (ctrl+x, then c) and `f4`. The panel family is rooted at the
   topmost ancestor, so the whole family is shown, not just the child subtree.
-- OpenTUI pinned `0.5.17`; `@opencode/plugin` types devDep pinned `2.0.26`
-  (drift-watch now tracks both). Tested against opencode **2.0.26**.
+- OpenTUI pinned `0.5.17`; tested against opencode **2.0.26**.
 
 ## 1.2.2 — 2026-10-08
 
-- TUI entry split for maintainability: `tui.tsx` down to ~195 lines; the
-  components and the data layer moved to `lib/` (`tui-sidebar.tsx`,
-  `tui-panel.tsx`, `tui-data.js` + `.d.ts`, `tui-theme.js`). No behavior
-  change. The pragma regression gate now covers every `lib/*.tsx`.
-- E2E hardened: deterministic fail-closed plugin-load check (isolated global
-  config via `OPENCODE_CONFIG_DIR` + the isolated instance's own log file +
-  a live-surface stamp), cleanup of spawned CLI instances, WMI probe timeouts.
+- Maintenance release: internal restructuring and test-hardening only. No
+  user-facing change.
 
 ## 1.2.1 — 2026-10-08
 
@@ -744,8 +570,6 @@ views.
   window" (upstream #51271).
 - `state.json`: new `reserve` field; the panel and `/context` show
   `compact at X (N reserve)`.
-- Unit harness extended to 34 checks (measured contributors, redacted-export
-  invariants, ceiling formula, hydrate seeding).
 - OpenTUI pinned `0.5.16`.
 
 ## 1.2.0 — 2026-10-04
@@ -761,7 +585,7 @@ views.
 ## 1.1.6 — 2026-10-04
 
 - OpenTUI pinned `0.5.14` (opencode 2.0.21+), optional-peer floor aligned.
-- `index.js` split into `lib/` modules (no behavior change).
+- Internal split into modules (no behavior change).
 
 ## 1.1.5 — 2026-10-02
 
@@ -770,8 +594,8 @@ views.
 
 ## 1.1.4 — 2026-10-02
 
-- Removed a stray `opencode/process` import from the TUI entry; the prepublish
-  gate now rejects bare `opencode/*` specifiers (not bridged at runtime).
+- Fixed a stray `opencode/process` import in the TUI entry (bare `opencode/*`
+  specifiers are not bridged at runtime).
 
 ## 1.1.3 — 2026-10-01
 
