@@ -4,6 +4,14 @@ Notable user-facing changes per release. Dates are commit days (UTC).
 The package also ships a dual V1/V2 plugin — see the README for the surface
 matrix; everything below concerns the V2 path unless stated otherwise.
 
+## 1.9.7 - 2026-11-23
+
+- **Works with opencode 2.4.1 / OpenTUI 0.9.4.** Verified against the released
+  2.4.1 host: nothing on the surface this plugin observes changed, so every
+  displayed number keeps its meaning. The OpenTUI devDependencies follow the
+  host catalog (0.9.4); the sidebar is rendered by the host's OpenTUI runtime,
+  and the package ships no OpenTUI copy of its own.
+
 ## 1.9.6 - 2026-11-18
 
 - **Works with opencode 2.3.2.** Verified against the released 2.3.2 host:
