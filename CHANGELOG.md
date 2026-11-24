@@ -4,6 +4,30 @@ Notable user-facing changes per release. Dates are commit days (UTC).
 The package also ships a dual V1/V2 plugin — see the README for the surface
 matrix; everything below concerns the V2 path unless stated otherwise.
 
+## 1.10.0 - 2026-11-23
+
+- **No more duplicate FINAL log notes when instances straddle a minute
+  boundary.** The exactly-once claim behind the idle (FINAL) notes in
+  `context-breakdown.log` is now bound to the event itself - the host's event
+  id first, then any event timestamp - instead of a per-minute
+  processing-time bucket. Two plugin instances that mirror the same event
+  stream can no longer build different claim keys for one logical event just
+  because their processing times fell on different sides of a minute boundary.
+  For events that carry no identity at all the fallback bucket shrinks from
+  60 s to 5 s on the V2 path (V1 already used 5 s and now also gains the
+  id/timestamp tiers, with its id-tier key scoped per session), which also
+  makes it far less likely that two distinct idles inside one window suppress
+  each other's note. Error notes deliberately keep their per-minute throttle:
+  identical errors of one session still produce at most one note per minute,
+  as before.
+- **Docs: subagent reports are not parent `toolOut` rows.** Since opencode
+  2.3.0 a `task` tool result carries only the subagent's session ID - the
+  child reports back on its own idle - so subagent content is tracked per
+  child session (the `subagents` rollup, the `/cx` family view), not as a
+  heavy parent tool result. README wording and one code comment now say that;
+  the measurement code itself was already role- and tool-agnostic and needed
+  no change.
+
 ## 1.9.7 - 2026-11-23
 
 - **Works with opencode 2.4.1 / OpenTUI 0.9.4.** Verified against the released

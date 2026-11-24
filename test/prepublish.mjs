@@ -7,7 +7,7 @@
  *       the opencode TUI loader bridges (keeps npm installs live, #33884)
  *   (c) resolve chain - host-bridged modules resolve, local imports exist, and
  *       none of them is a production dependency (no duplicate instance)
- *   (d) unit-harness T1-T48 (139 checks) for the limit/agent/state/command/
+ *   (d) unit-harness T1-T50 (141 checks) for the limit/agent/state/command/
  *       Desktop-RPC fixes, the family list cap, family-aware retention (incl. a
  *       randomized invariant test and a 120-step merge/evict soak) and the
  *       recursive V1 subagent walk (caps, diamond, waves, failures)
@@ -4102,8 +4102,99 @@ check("T32 client-context fallback never shadows hook-measured categories", () =
   });
 }
 
+// ---------------------------------------------------------------------------
+// T49 - claim keys bind to the EVENT identity, not to the local clock (B4).
+// Mirrored plugin instances process the same logical event at slightly
+// different times; a processing-time bucket straddling a boundary would hand
+// the two instances different keys and let both log the event.
+// ---------------------------------------------------------------------------
+{
+  const dedupMod = await import(pathToFileURL(join(repoRoot, "lib", "dedup.js")).href);
+
+  check("T49 eventClaimKey: event identity first, 5s bucket last resort", () => {
+    // Tier 1: ids (the v2 envelope id, then the v1-style properties.id).
+    assert(
+      dedupMod.eventClaimKey("final", { id: "ev_1" }, "ses_a", "", 0) === "final:ses_a:ev_1",
+      "an envelope id must win",
+    );
+    assert(
+      dedupMod.eventClaimKey("final", { properties: { id: "p_1" } }, "ses_a", "", 0) ===
+        "final:ses_a:p_1",
+      "a properties.id must win",
+    );
+    // An empty id is not an identity: keeping it would collapse every event of
+    // the session onto one key.
+    assert(
+      dedupMod.eventClaimKey("final", { id: "" }, "ses_a", "", 60_000) ===
+        `final:ses_a:${Math.floor(60_000 / dedupMod.EVENT_CLAIM_BUCKET_MS)}`,
+      "an empty id must fall through to the bucket",
+    );
+    // An id equal to the session id is just as useless as an empty one: it
+    // would turn the key into a session constant for the whole marker TTL.
+    assert(
+      dedupMod.eventClaimKey("final", { id: "ses_a" }, "ses_a", "", 60_000) ===
+        `final:ses_a:${Math.floor(60_000 / dedupMod.EVENT_CLAIM_BUCKET_MS)}`,
+      "an id equal to the session id must fall through to the bucket",
+    );
+    // Tier 2: timestamps, envelope or payload, string or number, scope-aware.
+    assert(
+      dedupMod.eventClaimKey("final", { time: "2026-11-23T10:00:00Z" }, "ses_a", "", 0) ===
+        "final:ses_a:2026-11-23T10:00:00Z",
+      "an envelope time must bind",
+    );
+    assert(
+      dedupMod.eventClaimKey("err", { data: { time: 1732348800000 } }, "ses_a", "Timeout", 0) ===
+        "err:ses_a:Timeout:1732348800000",
+      "a payload time must bind with the scope part",
+    );
+    // Tier 3: identity-free event -> deterministic short bucket.
+    assert(
+      dedupMod.eventClaimKey("final", {}, "ses_a", "", 12_345_678) === "final:ses_a:2469",
+      "an identity-free event must use the 5s bucket",
+    );
+    // A forgotten nowMs must fall back to the clock, never bake NaN into the
+    // key (a NaN bucket would be one constant key per session).
+    assert(
+      /^final:ses_a:\d+$/.test(
+        dedupMod.eventClaimKey("final", {}, "ses_a", "", undefined),
+      ),
+      "a missing nowMs must fall back to the clock, never to NaN",
+    );
+    // The same event builds the SAME key regardless of the local clock: that is
+    // the property that keeps mirrored instances on one marker.
+    const ev = { id: "ev_dup" };
+    assert(
+      dedupMod.eventClaimKey("final", ev, "ses_a", "", 1) ===
+        dedupMod.eventClaimKey("final", ev, "ses_a", "", 1_999_999_999_999),
+      "the same event must map to one key regardless of the local clock",
+    );
+  });
+}
+
+// ---------------------------------------------------------------------------
+// T50 - the cross-instance claim behind those keys: the same logical idle
+// claimed by a second instance must lose; a distinct event on the same session
+// must still claim. (The dedup-dir env var points at the harness scratch dir
+// since the earlier state-file block.)
+// ---------------------------------------------------------------------------
+{
+  const dedupMod = await import(pathToFileURL(join(repoRoot, "lib", "dedup.js")).href);
+
+  check("T50 claimOnce: a second claim of the same idle event loses", () => {
+    const dir = process.env.OPENCODE_CONTEXT_INDICATOR_DEDUP_DIR;
+    const key = dedupMod.eventClaimKey("final", { id: "ev_t50" }, "ses_t50", "", 0);
+    assert(dedupMod.claimOnce(key, dir) === true, "the first claim must win");
+    assert(
+      dedupMod.claimOnce(key, dir) === false,
+      "a second claim of the same event must lose",
+    );
+    const next = dedupMod.eventClaimKey("final", { id: "ev_t50b" }, "ses_t50", "", 0);
+    assert(dedupMod.claimOnce(next, dir) === true, "a distinct event must still claim");
+  });
+}
+
 if (failed) fatal(`${failed} unit test(s) failed`);
-pass(`all ${ranChecks} unit checks passed (T1-T48)`);
+pass(`all ${ranChecks} unit checks passed (T1-T50)`);
 
 // ---------------------------------------------------------------------------
 // (e) corporate-identifier scan — no employer/vendor-specific names may appear
