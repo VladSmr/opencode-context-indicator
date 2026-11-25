@@ -231,4 +231,15 @@ accounting counts the key and separator of every row, and the writer measures
 the file it is about to write. The per-instance in-memory maps keep their own
 smaller cap (256) and are recency-ordered: a re-written key moves to the tail, so
 `pruneMap()` evicts LRU by last write and an actively updated session is never
-dropped ahead of an idle one. That cap is RAM only and never touches the file.
+dropped ahead of an idle one. That cap is RAM only and never touches the file,
+and it is deliberately smaller than the file cap: the maps are caches over the
+authoritative file, so a miss is self-healing rather than data loss.
+
+Two retention guards keep the family math honest. A far-future `updatedAt` (a
+clock that jumped back after being ahead, or a poisoned file) can never age past
+the tombstone window, and as a family's newest row it would pin the whole family
+against eviction forever: the prune pass rewrites such rows (more than a minute
+ahead) to "now" and logs the clamp, so the row lives one normal window and then
+ages out with its family. Small clock skews are left alone - they cannot matter
+inside a 7-day window. A clamped row's displayed snapshot time becomes the
+clamp moment, which is accepted for a row whose timestamp was already corrupt.

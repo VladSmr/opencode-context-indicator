@@ -4,6 +4,29 @@ Notable user-facing changes per release. Dates are commit days (UTC).
 The package also ships a dual V1/V2 plugin — see the README for the surface
 matrix; everything below concerns the V2 path unless stated otherwise.
 
+## 1.10.1 - 2026-11-25
+
+- **A far-future timestamp can no longer pin a session family against
+  eviction.** A clock that jumped back after being ahead (or a hand-edited /
+  poisoned state file) could leave an `updatedAt` years in the future: such a
+  row never grows older than the 7-day tombstone window and, as the newest
+  row of its family, kept the whole family alive forever. The prune pass now
+  rewrites far-future rows (more than a minute ahead) to "now" and logs the
+  clamp, so the row lives one normal window and then ages out with its
+  family. Small clock skews are left alone - they cannot matter inside the
+  window. A clamped row's age display (the TUI/Desktop snapshot time) shows
+  the clamp moment afterwards, which is accepted for a row whose timestamp
+  was already corrupt.
+- **The trailing `session.compacted` note claim now uses the shared
+  event-bound key helper** (the same tiers as the idle FINAL notes: event id,
+  then event timestamp, then a short 5 s per-session bucket instead of a
+  minute bucket). Two distinct compactions of one session inside one minute
+  are no longer silently collapsed when the host sends no event identity.
+- **The in-memory map cap stays at 256 - now documented.** The session maps
+  are caches over the shared state file (which stays authoritative and
+  bounded at 1024 entries), so a miss is self-healing; the rationale lives
+  next to the constant instead of in someone's head.
+
 ## 1.10.0 - 2026-11-23
 
 - **No more duplicate FINAL log notes when instances straddle a minute

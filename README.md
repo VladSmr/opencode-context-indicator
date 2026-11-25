@@ -541,7 +541,7 @@ event / hook path must never throw into the caller.
 
 ```bash
 npm run build:gui             # build dist/gui-experimental.cjs (required by the gate)
-npm run test:prepublish       # fast gate: tarball + JSX-free TUI + resolve + T1-T50 + GUI gates
+npm run test:prepublish       # fast gate: tarball + JSX-free TUI + resolve + T1-T51 + GUI gates
 npm run test:types            # tsc for the TUI entry AND the Desktop GUI part
 npm run test:e2e              # full E2E: load + one "Say OK" round-trip + npm-layout liveness
 npm run test:e2e:quick        # load-only, no LLM call (--check-c: npm-layout only)
@@ -564,7 +564,7 @@ budget), so the full chain is roughly **30 s warm to ~2 min cold**.
 | (a) tarball composition | `package.json` `files[]` expands to the base files plus every `lib/*` module (count asserted dynamically); `docs/` may contain images and `internals.md` only; `dist/` only the built GUI bundle | no test/node_modules/tsconfig in the tarball, and no published export pointing at nothing |
 | (b) JSX-free TUI | no `.tsx`/`.jsx` in the TUI surface (root + `lib/`), every TUI source parses with esbuild `loader:"ts"`, no `@jsx*` pragma, imports stay inside the host-bridgeable allowlist, relative imports carry a file extension | OpenCode skips its Solid transform under `node_modules` (#33884): one JSX file freezes the npm-installed sidebar |
 | (c) resolve chain | walks the real TUI import graph (`resolve-bridge.cjs`): every bare specifier is host-bridged, every relative one resolves to a shipped file, and **no host-bridged module is a production dependency** | an accidental runtime dependency, or a bad local import, silently breaks the sidebar |
-| (d) unit harness T1-T50 | **141 checks** against the extracted lib modules: limits/agent/state, contributors, redacted export, sanitizers, prompt-cache, waste detector, compaction reserve, diff, subagent rollup, Desktop RPC, panel width budget, deleted-session purge, the released-core ceiling, the family-list cap, recency-ordered (LRU) in-memory caches, event-bound claim keys, family-aware retention (incl. a randomized 40-forest invariant test and a 120-step merge/evict soak) and the recursive V1 walk (caps, diamond/shared child, exact 64/65 boundary, waves, failures). The full list is in `test/prepublish.mjs` | regressions in modelLimits, writeStateFile, hydrate, contributors, export, categories, compaction reserve, panel layout, cache eviction, retention, claim keys or the V1 rollup |
+| (d) unit harness T1-T51 | **142 checks** against the extracted lib modules: limits/agent/state, contributors, redacted export, sanitizers, prompt-cache, waste detector, compaction reserve, diff, subagent rollup, Desktop RPC, panel width budget, deleted-session purge, the released-core ceiling, the family-list cap, recency-ordered (LRU) in-memory caches, event-bound claim keys, family-aware retention (incl. a randomized 40-forest invariant test, a 120-step merge/evict soak and the future-updatedAt clamp) and the recursive V1 walk (caps, diamond/shared child, exact 64/65 boundary, waves, failures). The full list is in `test/prepublish.mjs` | regressions in modelLimits, writeStateFile, hydrate, contributors, export, categories, compaction reserve, panel layout, cache eviction, retention, claim keys or the V1 rollup |
 | (e) corporate-identifier scan | no forbidden identifiers in the published surface (`index.js`, `tui.ts`, `lib/*`, `gui/*`, `README.md`, `CHANGELOG.md`, `package.json`, the GUI build config) or the test tree | compliance |
 | (f) non-English scan | no non-ASCII letters (`\p{L}` above U+007F) in the same published surface and test tree (`docs/` is not text-scanned) | English-only source rule |
 | (g) Desktop GUI bundle | `dist/gui-experimental.cjs` exists and is a non-trivial single-file CJS bundle: no ESM `import`, no dynamic `import()`, no Node built-in, and every app-provided module (`solid-js`, `solid-js/web`, `@opencode/plugin/gui`, `@opencode/plugin/rpc`) still a `require()` - no bundled second copy, no React/OpenTUI/bare-`opencode` import; the artifact must also be newer than every source file it inlines | a stale or hand-edited bundle, or a build that inlines the app instance, breaks the Desktop panel at load time |
@@ -613,7 +613,7 @@ repo inactivity — a push or manual run re-enables them):
 1. `tsc --noEmit` and `tsc -p tsconfig.gui.json --noEmit` - typecheck the TUI
    entry (`tui.ts` + `lib/*`) and the Desktop GUI part (`gui/*.tsx`);
 2. `npm run build:gui` - build the bundle the gate inspects;
-3. `test/prepublish.mjs` - gates **(a)-(h)**, 141 unit checks, via the esbuild
+3. `test/prepublish.mjs` - gates **(a)-(h)**, 142 unit checks, via the esbuild
    **programmatic API** (a Linux bin/esbuild binary cannot be spawned);
 4. `test/drift-watch.mjs` - compares the OpenTUI pins and `@opencode/plugin`
    types with the **latest released** opencode. Advisory by default: patch drift

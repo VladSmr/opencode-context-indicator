@@ -7,7 +7,7 @@
  *       the opencode TUI loader bridges (keeps npm installs live, #33884)
  *   (c) resolve chain - host-bridged modules resolve, local imports exist, and
  *       none of them is a production dependency (no duplicate instance)
- *   (d) unit-harness T1-T50 (141 checks) for the limit/agent/state/command/
+ *   (d) unit-harness T1-T51 (142 checks) for the limit/agent/state/command/
  *       Desktop-RPC fixes, the family list cap, family-aware retention (incl. a
  *       randomized invariant test and a 120-step merge/evict soak) and the
  *       recursive V1 subagent walk (caps, diamond, waves, failures)
@@ -967,6 +967,101 @@ check("T17 state tombstone prune: month-old entries drop, fresh survive", () => 
   const snap = read();
   assert(!("ses_T17_OLD" in snap), "40-day-old entry should be pruned");
   assert("ses_T17_FRESH" in snap, "1-day-old entry should survive");
+});
+
+// ---------------------------------------------------------------------------
+// T51 - far-future updatedAt must not pin a family against eviction forever
+// (B14). A clock that jumped back after being ahead (or a poisoned file) can
+// leave rows whose updatedAt is years ahead: their age never exceeds the
+// 7-day tombstone window, and as the family MAXIMUM such a row keeps the
+// whole family alive forever. The prune pass rewrites such rows to "now"
+// (persisted), so the row lives one normal window and then ages out with its
+// family - the pin is gone by construction, no data dropped on suspicion.
+// ---------------------------------------------------------------------------
+check("T51 future-updatedAt clamp: pin removed, family evictable again", () => {
+  const cur = read();
+  // Family of two: a poisoned root far in the future + a month-old child.
+  // Before the clamp the root keeps the WHOLE family alive forever. Five more
+  // future rows exercise the capped name list ("+N more") in the clamp note;
+  // a 30s-ahead row pins the tolerance boundary (small skews must stay
+  // untouched), and two non-object junk rows pin the no-throw guarantee.
+  cur.ses_T51_ROOT = {
+    sessionID: "ses_T51_ROOT", parentID: null, role: "main", agent: null,
+    model: "model-alpha", providerID: "test-provider",
+    updatedAt: "2030-01-01T00:00:00.000Z",
+  };
+  for (let i = 1; i <= 5; i++) {
+    cur[`ses_T51_F${i}`] = {
+      sessionID: `ses_T51_F${i}`, parentID: null, role: "main", agent: null,
+      model: "model-alpha", providerID: "test-provider",
+      updatedAt: "2031-06-01T00:00:00.000Z",
+    };
+  }
+  cur.ses_T51_CHILD = {
+    sessionID: "ses_T51_CHILD", parentID: "ses_T51_ROOT", role: "sub", agent: null,
+    model: "model-alpha", providerID: "test-provider",
+    updatedAt: new Date(Date.now() - 40 * 86400e3).toISOString(),
+  };
+  cur.ses_T51_SKEW = {
+    sessionID: "ses_T51_SKEW", parentID: null, role: "main", agent: null,
+    model: "model-alpha", providerID: "test-provider",
+    updatedAt: new Date(Date.now() + 30 * 1000).toISOString(),
+  };
+  cur.ses_T51_PRIM = 5;
+  cur.ses_T51_NULL = null;
+  writeFileSync(HARNESS_STATE, JSON.stringify(cur), "utf8");
+  const capT51 = capture(() =>
+    mod.writeStateFile("ses_MAIN", "model-alpha", "test-provider", 279000, 279312, 0),
+  );
+  const after = read();
+  // Six far-future rows clamped to ~now, note logged with the capped list.
+  const rootTs = Date.parse(after.ses_T51_ROOT.updatedAt);
+  assert(
+    rootTs > Date.now() - 60_000 && rootTs <= Date.now() + 1_000,
+    `root updatedAt must be clamped to ~now, got ${after.ses_T51_ROOT.updatedAt}`,
+  );
+  assert(
+    Date.parse(after.ses_T51_F5.updatedAt) > Date.now() - 60_000,
+    "every far-future row must be clamped",
+  );
+  assert(
+    capT51.errs.join("\n").includes("clamped 6 future-updatedAt row(s)") &&
+      capT51.errs.join("\n").includes("+3 more"),
+    `clamp note with capped names must be logged, got: ${capT51.errs.join(" | ") || "(nothing)"}`,
+  );
+  // Inside the tolerance -> untouched: small skews must not churn every write.
+  assert(
+    after.ses_T51_SKEW.updatedAt === cur.ses_T51_SKEW.updatedAt,
+    "a row 30s ahead must stay untouched",
+  );
+  // Non-object junk entries: neither clamped, nor crashed on, nor renamed.
+  assert(
+    after.ses_T51_PRIM === 5 && after.ses_T51_NULL === null,
+    "non-object entries must survive the clamp pass untouched",
+  );
+  assert(
+    "ses_T51_CHILD" in after,
+    "the family stays whole while the clamped row reads as freshly written",
+  );
+  // Let the clamped rows age (simulate time passing): the family must now
+  // evict whole - impossible before the fix, the future row pinned it forever.
+  const aged = read();
+  aged.ses_T51_ROOT.updatedAt = new Date(Date.now() - 40 * 86400e3).toISOString();
+  for (let i = 1; i <= 5; i++) {
+    aged[`ses_T51_F${i}`].updatedAt = new Date(Date.now() - 40 * 86400e3).toISOString();
+  }
+  aged.ses_T51_CHILD.updatedAt = new Date(Date.now() - 40 * 86400e3).toISOString();
+  writeFileSync(HARNESS_STATE, JSON.stringify(aged), "utf8");
+  mod.writeStateFile("ses_MAIN", "model-alpha", "test-provider", 279000, 279312, 0);
+  const fin = read();
+  assert(
+    !("ses_T51_ROOT" in fin) && !("ses_T51_F3" in fin) && !("ses_T51_CHILD" in fin),
+    "the aged family must evict whole once the pin is gone",
+  );
+  assert(
+    "ses_T51_SKEW" in fin && fin.ses_T51_SKEW.updatedAt === cur.ses_T51_SKEW.updatedAt,
+    "the small-skew row must survive untouched across passes",
+  );
 });
 
 const t18ToolResult = (result) => ({
@@ -4194,7 +4289,7 @@ check("T32 client-context fallback never shadows hook-measured categories", () =
 }
 
 if (failed) fatal(`${failed} unit test(s) failed`);
-pass(`all ${ranChecks} unit checks passed (T1-T50)`);
+pass(`all ${ranChecks} unit checks passed (T1-T51)`);
 
 // ---------------------------------------------------------------------------
 // (e) corporate-identifier scan — no employer/vendor-specific names may appear
