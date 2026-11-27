@@ -80,6 +80,11 @@ const quickMode = process.argv.includes("--quick");
 // an LLM round-trip. The full gate (npm publish) always runs A + B + C.
 const onlyCheckC = process.argv.includes("--check-c");
 const INIT_TIMEOUT_MS = 45_000;
+// How long the Check A TUI stays ALIVE after the loading line when the
+// tui-live.stamp has not appeared yet (see checkA): long enough for a slow
+// host boot to reach setup(), short enough that a genuinely broken ./tui
+// entry still fails fast (~12 s + the post-kill poll below).
+const STAMP_GRACE_MS = 12_000;
 const STEP_TIMEOUT_MS = 80_000;
 const TOTAL_BUDGET_MS = 260_000;
 const runStartedAt = Date.now();
@@ -116,6 +121,11 @@ const LIVE_STATE     = join(tmpdir(), "opencode-context-indicator-state.json");
 // flipped by the owner's real config pointing at the npm package. Used for
 // Check A ONLY — Check B needs the owner's provider/model definitions.
 const ISOLATED_CONFIG_DIR = join(tmpdir(), "oci-e2e-config");
+// Check A crash evidence: on a failed assertion the FULL pty buffer is dumped
+// here (the console diag tail cuts to 1600 chars and had truncated the top of
+// a crash stack - the only part that names the actual import failure).
+// Listed in ARTIFACT_FILES so a passing run cleans a stale dump.
+const CHECK_A_PTY_DUMP = join(tmpdir(), "oci-e2e-checka-pty.log");
 // Private XDG roots (Check A only): the data root holds the authoritative log
 // file, so Check A's assertions can never be contaminated by the live
 // Desktop's log streams (see the PLUGIN_LOAD_RE block below).
@@ -155,6 +165,7 @@ const ARTIFACT_FILES = [
   `${ISOLATED_DB}-shm`,
   ISOLATED_STATE,
   ISOLATED_LOG_FILE,
+  CHECK_A_PTY_DUMP,
 ];
 
 function cleanupArtifacts() {
@@ -447,18 +458,51 @@ function diag(r) {
   console.error("  --- end diagnostic ---");
 }
 
+// Full pty buffer on disk for whichever Check A assertion fails (see
+// CHECK_A_PTY_DUMP): the console tail above can truncate the TOP of a crash
+// stack - the error message and the module that failed, i.e. the only part
+// that names the actual import failure.
+function dumpPtyBuffer(r) {
+  try {
+    writeFileSync(CHECK_A_PTY_DUMP, stripAnsi(r.buf || ""), "utf8");
+    console.error(`       full pty buffer: ${CHECK_A_PTY_DUMP}`);
+  } catch { /* best effort */ }
+}
+
 // ---------------------------------------------------------------------------
 // Check A: plugin load (isolated standalone TUI)
 // ---------------------------------------------------------------------------
 async function checkA() {
   console.log("\n=== Check A: plugin load (isolated standalone TUI) ===");
 
-  // Early-stop on the first of: the PTY load marker OR the authoritative
-  // log-file entrypoint line (atomic, so its presence implies the full line).
+  // Early-stop as soon as the ./tui entry PROVES it reached setup() (the
+  // stamp), so healthy runs keep the short kill window. Fallback: when the
+  // loading line has been seen but the stamp is still missing, give the TUI
+  // up to STAMP_GRACE_MS of real process life before the killTree - a host
+  // update can delay the TUI-side transform/plugin-load past the old fixed
+  // 2.5 s kill, and a stamp poll after the kill can never observe a late
+  // setup() (the poll below only helps the timeout path).
+  let logSeenAt = 0;
+  let stampSeen = false;
+  let lastProbe = 0;
   const r = await runPty(
     ["--standalone", "--print-logs"],
     INIT_TIMEOUT_MS,
-    (buf) => logHasCheckoutEntrypoint() || PLUGIN_LOAD_RE.test(buf),
+    (buf) => {
+      const now = Date.now();
+      // Throttled probes: this predicate runs on EVERY pty chunk and both
+      // probes hit the filesystem (a log re-read + a stamp stat), so a
+      // redraw-heavy TUI would otherwise issue hundreds of them per second.
+      if (now - lastProbe > 250) {
+        lastProbe = now;
+        if (!logSeenAt && (logHasCheckoutEntrypoint() || PLUGIN_LOAD_RE.test(buf))) {
+          logSeenAt = now;
+        }
+        if (existsSync(TUI_LIVE_STAMP)) stampSeen = true;
+      }
+      if (stampSeen) return true;
+      return logSeenAt > 0 && now - logSeenAt > STAMP_GRACE_MS;
+    },
     2500,
     // Isolated global config: the ONLY plugin entry is this checkout.
     ISOLATED_CONFIG_DIR,
@@ -477,9 +521,19 @@ async function checkA() {
   //     writes when the e2e marker env is set (the TUI captures console
   //     output, so a log-based marker is unreachable; a file is
   //     host-agnostic and deterministic).
-  const slice = newLogSlice();
-  const loadSeen  = /msg="loading plugin"/.test(slice);
-  const repoSeen  = slice.includes(`entrypoint=${CHECKOUT_ENTRYPOINT}`);
+  let slice = newLogSlice();
+  let loadSeen  = /msg="loading plugin"/.test(slice);
+  let repoSeen  = slice.includes(`entrypoint=${CHECKOUT_ENTRYPOINT}`);
+  // The early-stop can now fire on the stamp BEFORE the host logger has
+  // flushed the loading/entrypoint lines to disk - and the pty is killed
+  // 2.5 s later, so nothing more arrives after that. Mirror the stamp poll:
+  // a few re-reads before failing on a missing log line.
+  for (let i = 0; !loadSeen && i < 6; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    slice = newLogSlice();
+    loadSeen  = /msg="loading plugin"/.test(slice);
+    repoSeen  = repoSeen || slice.includes(`entrypoint=${CHECKOUT_ENTRYPOINT}`);
+  }
   // The early-stop can fire on the server-side loading line BEFORE the TUI
   // entry's setup() has written the stamp — poll briefly instead of failing
   // on a cold/slow machine (up to ~5 s).
@@ -499,6 +553,7 @@ async function checkA() {
   if (!loadSeen) {
     console.error("\n[FAIL] Check A: the isolated instance never logged a plugin load");
     if (r.timedOut) console.error(`  (timed out after ${INIT_TIMEOUT_MS} ms)`);
+    dumpPtyBuffer(r);
     diag(r);
     return false;
   }
@@ -511,10 +566,12 @@ async function checkA() {
     console.error(`       expected entrypoint=${CHECKOUT_ENTRYPOINT}`);
     console.error("       The isolated config (OPENCODE_CONFIG_DIR -> %TEMP%/oci-e2e-config) may not");
     console.error("       be honored by this CLI build, or the log line format changed.");
+    dumpPtyBuffer(r);
     diag(r);
     return false;
   }
   if (!liveMarkerSeen) {
+    dumpPtyBuffer(r);
     console.error("\n[FAIL] Check A: the live TUI surfaces were not registered");
     console.error("       The ./tui entry died between plugin load and setup() — most likely a");
     console.error("       host-transform / import failure inside the TUI file itself.");

@@ -4,6 +4,27 @@ Notable user-facing changes per release. Dates are commit days (UTC).
 The package also ships a dual V1/V2 plugin — see the README for the surface
 matrix; everything below concerns the V2 path unless stated otherwise.
 
+## 1.10.2 - 2026-11-26
+
+- **Host alignment: opencode 2.4.2 / OpenTUI 0.9.9.** The devDependency pins
+  (`@opentui/solid`, `@opentui/core`, `@opencode/plugin` types) now match the
+  released host catalog, so the TUI surfaces are typed against the renderer a
+  2.4.2 install ships. Verified against the released 2.4.2 core: the compaction
+  ceiling is unchanged (`RESERVE_SHARE` 0.15, `RESERVE_MIN` 16_000, the
+  `2 * RESERVE_MIN` gate, the `min(input, context)` window cap), so every
+  displayed percentage keeps matching what the host acts on. No plugin logic
+  changed - pins, type-surface comments and docs only.
+- **e2e Check A no longer races a slow TUI boot.** The isolated-load check
+  used to kill the TUI 2.5 s after the plugin-load line and then looked for
+  the live-surfaces stamp; a host boot that reached the plugin's setup()
+  later than that (observed twice right after the 2.4.2 update) failed the
+  check even though the plugin was healthy. The check now stops early only
+  when the stamp itself appears, and otherwise gives the TUI up to 12 s of
+  life before the kill (the 45 s boot timeout still bounds a silently hung
+  pty); a failing check also writes the full pty buffer to
+  `%TEMP%/oci-e2e-checka-pty.log` so a crash stack is no longer truncated
+  away by the console tail.
+
 ## 1.10.1 - 2026-11-25
 
 - **A far-future timestamp can no longer pin a session family against
